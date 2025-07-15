@@ -53,7 +53,8 @@ log "======== VPS-Update gestartet ========" "$GREEN"
 log "Hostname: $(hostname) | Kernel: $(uname -r) | Uptime: $(uptime -p)" "$BLUE"
 
 # ---------- 0. Backup durchführen (wenn aktiviert) ----------
-if [[ "$BACKUP_ENABLED" == "true" ]]; then
+# Führe Backup durch, es sei denn, es ist explizit auf "false" gesetzt.
+if [[ "$BACKUP_ENABLED" != "false" ]]; then
     if type -t perform_backup &>/dev/null; then
         if ! perform_backup; then
             if [[ "$CONTINUE_ON_BACKUP_FAIL" == "true" ]]; then
@@ -68,7 +69,7 @@ if [[ "$BACKUP_ENABLED" == "true" ]]; then
         exit 1
     fi
 else
-    log "Backup deaktiviert (VPS_UPDATE_BACKUP_ENABLED != true)." "$YELLOW"
+    log "Backup explizit deaktiviert (VPS_UPDATE_BACKUP_ENABLED=false)." "$YELLOW"
 fi
 
 # ---------- 1. Docker + Coolify sicher anhalten ----------
@@ -76,7 +77,7 @@ if command -v docker &>/dev/null; then
   RUNNING=$(docker ps -q || true)
   if [[ -n $RUNNING ]]; then
     log "Stoppe $(( $(wc -l <<<"$RUNNING") )) Container (Timeout ${DOCKER_STOP_TIMEOUT}s) …" "$YELLOW"
-    docker stop --time="$DOCKER_STOP_TIMEOUT" $RUNNING || log "Einige Container stoppten nicht sauber." "$YELLOW"
+    docker stop --timeout="$DOCKER_STOP_TIMEOUT" $RUNNING || log "Einige Container stoppten nicht sauber." "$YELLOW"
   fi
   systemctl stop coolify 2>/dev/null || true
   systemctl stop docker     || err "Docker ließ sich nicht stoppen"
@@ -131,4 +132,3 @@ if $NEED_REBOOT; then
 fi
 
 log "======== Update abgeschlossen – kein Reboot nötig ========" "$GREEN"
-
