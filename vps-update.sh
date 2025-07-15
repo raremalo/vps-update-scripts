@@ -50,7 +50,7 @@ fi
 log "Aktualisiere Paketlisten …" "$BLUE"
 apt-get update -qq
 
-SEC=$(apt list --upgradable 2>/dev/null | grep -ci security)
+SEC=$(apt list --upgradable 2>/dev/null | grep -ci security || true)
 TOT=$(apt list --upgradable 2>/dev/null | tail -n +2 | wc -l)
 log "Gefundene Updates: $TOT (davon $SEC Sicherheitsupdates)" "$BLUE"
 
