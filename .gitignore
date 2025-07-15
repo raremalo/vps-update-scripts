@@ -1,0 +1,5 @@
+# Log files and temporary data
+*.log
+*.txt
+*.lock
+
