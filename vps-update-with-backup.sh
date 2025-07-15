@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================
-# VPS-Update-Script 2.1 – Ubuntu 24.04 LTS + Coolify + Docker
+# VPS-Update-Script 2.2 – Ubuntu 24.04 LTS + Coolify + Docker
 # Mit integrierter Backup-Funktion
 # ==============================================================
 
@@ -12,7 +12,12 @@ LOG_DIR="${VPS_UPDATE_LOG_DIR:-/var/log/vps-updates}"
 LOCK_FILE="/tmp/vps_update.lock"
 DOCKER_STOP_TIMEOUT="${DOCKER_STOP_TIMEOUT:-30}"
 HOLD_PKGS=(snapd ubuntu-advantage-tools landscape-common)
+
+# Backup-Konfiguration
 BACKUP_ENABLED="${VPS_UPDATE_BACKUP_ENABLED:-true}"
+BACKUP_FUNCTIONS_PATH="/usr/local/lib/vps-script/backup-functions.sh"
+# Bei Backup-Fehler abbrechen? (true zum Fortfahren, false zum Abbrechen)
+CONTINUE_ON_BACKUP_FAIL="${VPS_UPDATE_ON_BACKUP_FAIL:-false}"
 # ---------------------------------------------------------------
 
 # Farben
@@ -32,13 +37,16 @@ trap cleanup EXIT
 [[ ! -e $LOCK_FILE ]] || { err "Lock-File existiert – Script läuft bereits."; exit 1; }
 touch "$LOCK_FILE"
 
-# Backup-Funktionen einbinden
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f "$SCRIPT_DIR/backup-functions.sh" ]]; then
-    source "$SCRIPT_DIR/backup-functions.sh"
-else
-    err "Warnung: backup-functions.sh nicht gefunden – Backup wird übersprungen"
-    BACKUP_ENABLED="false"
+# Backup-Funktionen einbinden (wenn Backups aktiviert sind)
+if [[ "$BACKUP_ENABLED" == "true" ]]; then
+    if [[ -f "$BACKUP_FUNCTIONS_PATH" ]]; then
+        # shellcheck source=/dev/null
+        source "$BACKUP_FUNCTIONS_PATH"
+    else
+        err "FEHLER: Backup-Funktionen nicht gefunden unter $BACKUP_FUNCTIONS_PATH"
+        err "Bitte stellen Sie sicher, dass die Suite korrekt installiert ist."
+        exit 1
+    fi
 fi
 
 log "======== VPS-Update gestartet ========" "$GREEN"
@@ -48,22 +56,26 @@ log "Hostname: $(hostname) | Kernel: $(uname -r) | Uptime: $(uptime -p)" "$BLUE"
 if [[ "$BACKUP_ENABLED" == "true" ]]; then
     if type -t perform_backup &>/dev/null; then
         if ! perform_backup; then
-            log "WARNUNG: Backup fehlgeschlagen – fortfahren? (Strg+C zum Abbrechen)" "$YELLOW"
-            log "Warte 10 Sekunden..." "$YELLOW"
-            sleep 10
+            if [[ "$CONTINUE_ON_BACKUP_FAIL" == "true" ]]; then
+                log "WARNUNG: Backup fehlgeschlagen, fahre aber aufgrund der Konfiguration fort." "$YELLOW"
+            else
+                err "FEHLER: Backup fehlgeschlagen. Breche das Update ab."
+                exit 1
+            fi
         fi
     else
-        err "Backup-Funktion nicht verfügbar"
+        err "FEHLER: Backup-Funktion 'perform_backup' nicht verfügbar."
+        exit 1
     fi
 else
-    log "Backup deaktiviert (VPS_UPDATE_BACKUP_ENABLED != true)" "$YELLOW"
+    log "Backup deaktiviert (VPS_UPDATE_BACKUP_ENABLED != true)." "$YELLOW"
 fi
 
 # ---------- 1. Docker + Coolify sicher anhalten ----------
 if command -v docker &>/dev/null; then
   RUNNING=$(docker ps -q || true)
   if [[ -n $RUNNING ]]; then
-    log "Stoppe $(( $(wc -l <<<$RUNNING) )) Container (Timeout ${DOCKER_STOP_TIMEOUT}s) …" "$YELLOW"
+    log "Stoppe $(( $(wc -l <<<"$RUNNING") )) Container (Timeout ${DOCKER_STOP_TIMEOUT}s) …" "$YELLOW"
     docker stop --time="$DOCKER_STOP_TIMEOUT" $RUNNING || log "Einige Container stoppten nicht sauber." "$YELLOW"
   fi
   systemctl stop coolify 2>/dev/null || true
@@ -119,3 +131,4 @@ if $NEED_REBOOT; then
 fi
 
 log "======== Update abgeschlossen – kein Reboot nötig ========" "$GREEN"
+
