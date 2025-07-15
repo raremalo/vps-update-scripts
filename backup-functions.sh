@@ -28,11 +28,24 @@ create_backup_dir() {
     echo "$backup_path"
 }
 
-# Funktion: Freien Speicherplatz prüfen
+# Funktion: Freien Speicherplatz prüfen (robust)
 check_free_space() {
     local path="${1:-/}"
-    local free_space_mb=$(df -m "$path" | awk 'NR==2 {print $4}')
     
+    # Sicherstellen, dass das Verzeichnis existiert, bevor wir es prüfen
+    if ! mkdir -p "$path"; then
+        err "Konnte Pfad für Speicherplatzprüfung nicht erstellen: $path"
+        return 1
+    fi
+    
+    local free_space_mb
+    free_space_mb=$(df -m "$path" | awk 'NR==2 {print $4}')
+    
+    if [[ -z "$free_space_mb" ]] || [[ ! "$free_space_mb" =~ ^[0-9]+$ ]]; then
+        err "Konnte freien Speicherplatz nicht ermitteln."
+        return 1
+    fi
+
     if [[ $free_space_mb -lt $MIN_FREE_SPACE_MB ]]; then
         err "Unzureichender Speicherplatz: ${free_space_mb}MB frei (benötigt: ${MIN_FREE_SPACE_MB}MB)"
         return 1
