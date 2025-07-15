@@ -77,7 +77,10 @@ fi
 
 # ---------- 4. Services neu starten ----------
 systemctl start docker 2>/dev/null || err "Docker konnte nicht neu starten"
-systemctl start coolify 2>/dev/null || true
+log "Warte 15s auf die Docker-Initialisierung..." "$BLUE"
+sleep 15
+log "Starte Coolify neu, um alle Projekte zu reaktivieren..." "$BLUE"
+systemctl restart coolify 2>/dev/null || log "Coolify neustarten fehlgeschlagen." "$YELLOW"
 
 # ---------- 5. Reboot-Entscheidung ----------
 NEED_REBOOT=false
