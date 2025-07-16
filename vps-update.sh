@@ -40,7 +40,7 @@ if command -v docker &>/dev/null; then
     log "Stoppe $(( $(wc -l <<<"$RUNNING") )) Container (Timeout ${DOCKER_STOP_TIMEOUT}s) …" "$YELLOW"
     docker stop --time="$DOCKER_STOP_TIMEOUT" $RUNNING || log "Einige Container stoppten nicht sauber." "$YELLOW"
   fi
-  systemctl stop coolify 2>/dev/null || true
+  docker stop coolify 2>/dev/null || true
   systemctl stop docker     || err "Docker ließ sich nicht stoppen"
 else
   log "Docker nicht installiert – Schritt übersprungen." "$YELLOW"
@@ -80,7 +80,7 @@ systemctl start docker 2>/dev/null || err "Docker konnte nicht neu starten"
 log "Warte 15s auf die Docker-Initialisierung..." "$BLUE"
 sleep 15
 log "Starte Coolify neu, um alle Projekte zu reaktivieren..." "$BLUE"
-systemctl restart coolify 2>/dev/null || log "Coolify neustarten fehlgeschlagen." "$YELLOW"
+docker restart coolify 2>/dev/null || log "Coolify neustarten fehlgeschlagen." "$YELLOW"
 
 # ---------- 5. Reboot-Entscheidung ----------
 NEED_REBOOT=false
