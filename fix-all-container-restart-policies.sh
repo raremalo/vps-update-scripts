@@ -87,16 +87,17 @@ log "Fehlgeschlagen: $FAILED_CONTAINERS" "$([ $FAILED_CONTAINERS -eq 0 ] && echo
 # Finaler Status-Report
 log "\n======== Finaler Status Report ========" "$GREEN"
 log "Container Status und Restart Policies:" "$BLUE"
-printf "%-40s %-15s %-20s\n" "CONTAINER" "STATUS" "RESTART POLICY"
-printf "%-40s %-15s %-20s\n" "$(printf '%0.s-' {1..40})" "$(printf '%0.s-' {1..15})" "$(printf '%0.s-' {1..20})"
+echo "---------------------------------------- --------------- --------------------"
+echo "CONTAINER                                STATUS          RESTART POLICY"
+echo "---------------------------------------- --------------- --------------------"
 
 for name in "${CONTAINERS[@]}"; do
     if [[ -n "$name" ]]; then
         STATUS=$(docker inspect --format '{{.State.Status}}' "$name" 2>/dev/null || echo "unknown")
         RESTART_POLICY=$(docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$name" 2>/dev/null || echo "unknown")
-        printf "%-40s %-15s %-20s\n" "$name" "$STATUS" "$RESTART_POLICY" || true
+        printf "%-40s %-15s %-20s\n" "$name" "$STATUS" "$RESTART_POLICY" 2>/dev/null || echo "$name $STATUS $RESTART_POLICY"
     fi
-done || true
+done
 
 log "\n======== Empfehlungen ========" "$BLUE"
 log "1. Teste den Autostart mit: sudo systemctl restart docker" "$YELLOW"
