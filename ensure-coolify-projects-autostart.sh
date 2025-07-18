@@ -82,4 +82,11 @@ log "Coolify Projekte Autostart-Konfiguration abgeschlossen" "$GREEN"
 
 # Status anzeigen
 log "Aktueller Status der Container:" "$BLUE"
-docker ps --format "table {{.Names}}\t{{.Status}}\t{{.RestartPolicy}}" | grep -E "(coolify|PROJECT)" || docker ps --format "table {{.Names}}\t{{.Status}}\t{{.RestartPolicy}}"
+(
+    echo -e "NAME\tSTATUS\tRESTART POLICY"
+    docker ps -a --format "{{.Names}}" | while read -r name; do
+        STATUS=$(docker inspect --format '{{.State.Status}}' "$name")
+        RESTART_POLICY=$(docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$name")
+        echo -e "$name\t$STATUS\t$RESTART_POLICY"
+    done
+) | column -t
