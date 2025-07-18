@@ -42,8 +42,11 @@ CONFIGURED_CONTAINERS=0
 ALREADY_CONFIGURED=0
 FAILED_CONTAINERS=0
 
+# Alle Container in Array einlesen (vermeidet Subshell-Problem)
+mapfile -t CONTAINERS < <(docker ps -a --format '{{.Names}}')
+
 # Alle Container durchgehen
-docker ps -a --format '{{.Names}}' | while read -r container_name; do
+for container_name in "${CONTAINERS[@]}"; do
     if [[ -n "$container_name" ]]; then
         ((TOTAL_CONTAINERS++))
         
@@ -78,7 +81,7 @@ log "Container Status und Restart Policies:" "$BLUE"
 printf "%-40s %-15s %-20s\n" "CONTAINER" "STATUS" "RESTART POLICY"
 printf "%-40s %-15s %-20s\n" "$(printf '%0.s-' {1..40})" "$(printf '%0.s-' {1..15})" "$(printf '%0.s-' {1..20})"
 
-docker ps -a --format '{{.Names}}' | while read -r name; do
+for name in "${CONTAINERS[@]}"; do
     if [[ -n "$name" ]]; then
         STATUS=$(docker inspect --format '{{.State.Status}}' "$name" 2>/dev/null || echo "unknown")
         RESTART_POLICY=$(docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$name" 2>/dev/null || echo "unknown")
