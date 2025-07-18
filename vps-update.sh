@@ -34,9 +34,10 @@ log "======== VPS-Update gestartet ========" "$GREEN"
 log "Hostname: $(hostname) | Kernel: $(uname -r) | Uptime: $(uptime -p)" "$BLUE"
 
 # Docker Autostart sicherstellen
-if [[ -f "./ensure-docker-autostart.sh" ]]; then
+AUTOSTART_SCRIPT="/usr/local/lib/vps-script/ensure-docker-autostart.sh"
+if [[ -f "$AUTOSTART_SCRIPT" ]]; then
     log "Überprüfe Docker Autostart-Konfiguration..." "$BLUE"
-    bash "./ensure-docker-autostart.sh"
+    bash "$AUTOSTART_SCRIPT"
 fi
 
 # ---------- 1. Docker + Coolify sicher anhalten ----------

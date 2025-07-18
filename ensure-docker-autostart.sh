@@ -71,7 +71,8 @@ done
 log "Docker Autostart-Konfiguration abgeschlossen" "$GREEN"
 
 # Coolify Projekte Autostart konfigurieren
-if [[ -f "./ensure-coolify-projects-autostart.sh" ]]; then
+COOLIFY_SCRIPT="/usr/local/lib/vps-script/ensure-coolify-projects-autostart.sh"
+if [[ -f "$COOLIFY_SCRIPT" ]]; then
     log "Konfiguriere Coolify Projekte Autostart..." "$BLUE"
-    bash "./ensure-coolify-projects-autostart.sh"
+    bash "$COOLIFY_SCRIPT"
 fi
