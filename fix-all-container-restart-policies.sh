@@ -55,27 +55,38 @@ fi
 log "Gefundene Container: ${#CONTAINERS[@]}" "$BLUE"
 
 # Alle Container durchgehen
+log "Starte Container-Verarbeitung..." "$BLUE"
 for container_name in "${CONTAINERS[@]}"; do
     if [[ -n "$container_name" ]]; then
-        ((TOTAL_CONTAINERS++))
+        log "Verarbeite: $container_name" "$YELLOW"
+        TOTAL_CONTAINERS=$((TOTAL_CONTAINERS + 1))
         
-        CURRENT_RESTART=$(docker inspect "$container_name" --format='{{.HostConfig.RestartPolicy.Name}}' 2>/dev/null || echo "none")
+        # Restart Policy prüfen
+        CURRENT_RESTART="none"
+        if CURRENT_RESTART=$(docker inspect "$container_name" --format='{{.HostConfig.RestartPolicy.Name}}' 2>/dev/null); then
+            log "  Aktuelle Policy: $CURRENT_RESTART" "$BLUE"
+        else
+            log "  Fehler beim Lesen der Policy" "$RED"
+            CURRENT_RESTART="none"
+        fi
         
+        # Policy setzen falls nötig
         if [[ "$CURRENT_RESTART" != "unless-stopped" ]] && [[ "$CURRENT_RESTART" != "always" ]]; then
             log "  Setze $container_name: $CURRENT_RESTART → unless-stopped" "$YELLOW"
-            if docker update --restart=unless-stopped "$container_name" 2>/dev/null; then
+            if docker update --restart=unless-stopped "$container_name" >/dev/null 2>&1; then
                 log "    ✓ $container_name erfolgreich konfiguriert" "$GREEN"
-                ((CONFIGURED_CONTAINERS++))
+                CONFIGURED_CONTAINERS=$((CONFIGURED_CONTAINERS + 1))
             else
                 log "    ⚠ $container_name Konfiguration fehlgeschlagen" "$RED"
-                ((FAILED_CONTAINERS++))
+                FAILED_CONTAINERS=$((FAILED_CONTAINERS + 1))
             fi
         else
             log "  ✓ $container_name bereits konfiguriert ($CURRENT_RESTART)" "$GREEN"
-            ((ALREADY_CONFIGURED++))
+            ALREADY_CONFIGURED=$((ALREADY_CONFIGURED + 1))
         fi
     fi
 done
+log "Container-Verarbeitung abgeschlossen" "$GREEN"
 
 # Statistik anzeigen
 log "\n======== Konfiguration Abgeschlossen ========" "$GREEN"
