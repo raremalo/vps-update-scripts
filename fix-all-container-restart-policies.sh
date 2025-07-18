@@ -4,7 +4,7 @@
 # Basierend auf der Analyse der script.txt - setzt alle Container auf unless-stopped
 # ==============================================================
 
-set -euo pipefail
+set -eo pipefail
 
 # Farben
 RED='\033[0;31m'
@@ -43,7 +43,16 @@ ALREADY_CONFIGURED=0
 FAILED_CONTAINERS=0
 
 # Alle Container in Array einlesen (vermeidet Subshell-Problem)
-mapfile -t CONTAINERS < <(docker ps -a --format '{{.Names}}')
+mapfile -t CONTAINERS < <(docker ps -a --format '{{.Names}}' 2>/dev/null || true)
+
+# Prüfe ob Container gefunden wurden
+if [[ ${#CONTAINERS[@]} -eq 0 ]] || [[ -z "${CONTAINERS[0]:-}" ]]; then
+    log "Keine Container gefunden!" "$YELLOW"
+    log "Script beendet." "$GREEN"
+    exit 0
+fi
+
+log "Gefundene Container: ${#CONTAINERS[@]}" "$BLUE"
 
 # Alle Container durchgehen
 for container_name in "${CONTAINERS[@]}"; do
@@ -85,9 +94,9 @@ for name in "${CONTAINERS[@]}"; do
     if [[ -n "$name" ]]; then
         STATUS=$(docker inspect --format '{{.State.Status}}' "$name" 2>/dev/null || echo "unknown")
         RESTART_POLICY=$(docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$name" 2>/dev/null || echo "unknown")
-        printf "%-40s %-15s %-20s\n" "$name" "$STATUS" "$RESTART_POLICY"
+        printf "%-40s %-15s %-20s\n" "$name" "$STATUS" "$RESTART_POLICY" || true
     fi
-done
+done || true
 
 log "\n======== Empfehlungen ========" "$BLUE"
 log "1. Teste den Autostart mit: sudo systemctl restart docker" "$YELLOW"
