@@ -101,6 +101,13 @@ log "Kein Reboot nötig – starte Services neu..." "$BLUE"
 systemctl start docker 2>/dev/null || err "Docker konnte nicht neu starten"
 log "Warte 15s auf die Docker-Initialisierung..." "$BLUE"
 sleep 15
+
+# Docker Autostart nach Service-Neustart erneut sicherstellen
+if [[ -f "$AUTOSTART_SCRIPT" ]]; then
+    log "Konfiguriere Docker Autostart nach Service-Neustart..." "$BLUE"
+    bash "$AUTOSTART_SCRIPT"
+fi
+
 log "Starte Coolify neu, um alle Projekte zu reaktivieren..." "$BLUE"
 docker restart coolify 2>/dev/null || log "Coolify neustarten fehlgeschlagen." "$YELLOW"
 

@@ -65,15 +65,24 @@ fi
 log "Konfiguriere alle verbleibenden Container auf Autostart..." "$BLUE"
 docker ps -a --format '{{.Names}}' | while read -r container_name; do
     if [[ -n "$container_name" ]]; then
-        # Überspringe System Container
+        # Überspringe bereits konfigurierte System Container
         if [[ "$container_name" == "coolify" ]] || [[ "$container_name" == "coolify-traefik" ]] || [[ "$container_name" == "coolify-realtime" ]]; then
             continue
         fi
         
-        # Prüfe ob es ein Projekt Container ist
-        if docker inspect "$container_name" --format='{{.Config.Labels}}' 2>/dev/null | grep -q "coolify"; then
-            docker update --restart=unless-stopped "$container_name"
-            log "  ✓ $container_name Autostart aktiviert" "$GREEN"
+        # Prüfe aktuelle restart policy
+        CURRENT_RESTART=$(docker inspect "$container_name" --format='{{.HostConfig.RestartPolicy.Name}}' 2>/dev/null || echo "none")
+        
+        # Konfiguriere Autostart wenn noch nicht gesetzt
+        if [[ "$CURRENT_RESTART" != "always" ]] && [[ "$CURRENT_RESTART" != "unless-stopped" ]]; then
+            # Prüfe ob es ein Projekt Container ist oder generell alle Container konfigurieren
+            if docker inspect "$container_name" --format='{{.Config.Labels}}' 2>/dev/null | grep -q "coolify" || true; then
+                docker update --restart=unless-stopped "$container_name" 2>/dev/null && \
+                    log "  ✓ $container_name Autostart aktiviert (war: $CURRENT_RESTART)" "$GREEN" || \
+                    log "  ⚠ $container_name Autostart fehlgeschlagen" "$YELLOW"
+            fi
+        else
+            log "  ✓ $container_name bereits konfiguriert ($CURRENT_RESTART)" "$GREEN"
         fi
     fi
 done
