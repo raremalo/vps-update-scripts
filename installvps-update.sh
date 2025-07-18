@@ -123,6 +123,27 @@ cat >/etc/logrotate.d/vps-update <<'EOF'
 }
 EOF
 
+# Docker Autostart-Scripts installieren
+echo "Installiere Docker Autostart-Scripts..."
+AUTOSTART_SCRIPT_SRC="$SCRIPT_DIR/ensure-docker-autostart.sh"
+AUTOSTART_SCRIPT_DEST="$LIB_DIR/ensure-docker-autostart.sh"
+COOLIFY_AUTOSTART_SCRIPT_SRC="$SCRIPT_DIR/ensure-coolify-projects-autostart.sh"
+COOLIFY_AUTOSTART_SCRIPT_DEST="$LIB_DIR/ensure-coolify-projects-autostart.sh"
+
+if [[ -f "$AUTOSTART_SCRIPT_SRC" ]]; then
+    install -Dm755 "$AUTOSTART_SCRIPT_SRC" "$AUTOSTART_SCRIPT_DEST"
+    log "✓ Docker Autostart-Script installiert" "$GREEN"
+else
+    log "⚠ Docker Autostart-Script nicht gefunden - übersprungen" "$YELLOW"
+fi
+
+if [[ -f "$COOLIFY_AUTOSTART_SCRIPT_SRC" ]]; then
+    install -Dm755 "$COOLIFY_AUTOSTART_SCRIPT_SRC" "$COOLIFY_AUTOSTART_SCRIPT_DEST"
+    log "✓ Coolify Projekte Autostart-Script installiert" "$GREEN"
+else
+    log "⚠ Coolify Projekte Autostart-Script nicht gefunden - übersprungen" "$YELLOW"
+fi
+
 echo -e "\n${GREEN}Installation abgeschlossen!${NC}"
 echo -e "Sie können die Skripte jetzt verwenden:\n- Manuelles Update: ${YELLOW}sudo vps-update${NC}\n- Status prüfen:    ${YELLOW}sudo vps-status${NC}"
 

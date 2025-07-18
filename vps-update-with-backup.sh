@@ -52,6 +52,12 @@ fi
 log "======== VPS-Update gestartet ========" "$GREEN"
 log "Hostname: $(hostname) | Kernel: $(uname -r) | Uptime: $(uptime -p)" "$BLUE"
 
+# Docker Autostart sicherstellen
+if [[ -f "./ensure-docker-autostart.sh" ]]; then
+    log "Überprüfe Docker Autostart-Konfiguration..." "$BLUE"
+    bash "./ensure-docker-autostart.sh"
+fi
+
 # ---------- 0. Backup durchführen (wenn aktiviert) ----------
 # Führe Backup durch, es sei denn, es ist explizit auf "false" gesetzt.
 if [[ "$BACKUP_ENABLED" != "false" ]]; then
@@ -114,14 +120,7 @@ if command -v snap &>/dev/null; then
      while read s r; do snap remove "$s" --revision="$r" || true; done
 fi
 
-# ---------- 4. Services neu starten ----------
-systemctl start docker 2>/dev/null || err "Docker konnte nicht neu starten"
-log "Warte 15s auf die Docker-Initialisierung..." "$BLUE"
-sleep 15
-log "Starte Coolify neu, um alle Projekte zu reaktivieren..." "$BLUE"
-docker restart coolify 2>/dev/null || log "Coolify neustarten fehlgeschlagen." "$YELLOW"
-
-# ---------- 5. Reboot-Entscheidung ----------
+# ---------- 4. Reboot-Entscheidung ----------
 NEED_REBOOT=false
 LATEST_KERNEL=$(dpkg-query -W -f='${Version}\n' "linux-image-$(uname -r | cut -d'-' -f1-2)" 2>/dev/null || echo "")
 if [ -f /var/run/reboot-required ] || [[ -z $LATEST_KERNEL ]]; then
@@ -129,9 +128,18 @@ if [ -f /var/run/reboot-required ] || [[ -z $LATEST_KERNEL ]]; then
 fi
 
 if $NEED_REBOOT; then
-  log "Reboot nötig – System startet in 10 s …" "$YELLOW"
+  log "Reboot nötig – Container werden nach dem Neustart automatisch gestartet..." "$YELLOW"
+  log "System startet in 10 s neu ..." "$YELLOW"
   sleep 10
   reboot
 fi
 
-log "======== Update abgeschlossen – kein Reboot nötig ========" "$GREEN"
+# ---------- 5. Services neu starten (nur wenn kein Reboot nötig) ----------
+log "Kein Reboot nötig – starte Services neu..." "$BLUE"
+systemctl start docker 2>/dev/null || err "Docker konnte nicht neu starten"
+log "Warte 15s auf die Docker-Initialisierung..." "$BLUE"
+sleep 15
+log "Starte Coolify neu, um alle Projekte zu reaktivieren..." "$BLUE"
+docker restart coolify 2>/dev/null || log "Coolify neustarten fehlgeschlagen." "$YELLOW"
+
+log "======== Update abgeschlossen ========" "$GREEN"
