@@ -84,7 +84,7 @@ if command -v docker &>/dev/null; then
   RUNNING=$(docker ps -q || true)
   if [[ -n $RUNNING ]]; then
     log "Stoppe $(( $(wc -l <<<"$RUNNING") )) Container (Timeout ${DOCKER_STOP_TIMEOUT}s) …" "$YELLOW"
-    docker stop --timeout="$DOCKER_STOP_TIMEOUT" $RUNNING || log "Einige Container stoppten nicht sauber." "$YELLOW"
+    docker stop --time="$DOCKER_STOP_TIMEOUT" $RUNNING || log "Einige Container stoppten nicht sauber." "$YELLOW"
   fi
   docker stop coolify 2>/dev/null || true
   systemctl stop docker     || err "Docker ließ sich nicht stoppen"
