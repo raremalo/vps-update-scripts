@@ -68,8 +68,9 @@ docker ps -a --format '{{.Names}} {{.Status}}' | while read -r name status; do
     fi
 done
 
-ot
-COcal/t/c-f "$COOLIFY_SCRIPT" ]]; then
+# Coolify Projekte Autostart-Script
+COOLIFY_SCRIPT="/usr/local/lib/vps-script/ensure-coolify-projects-autostart.sh"
+if [[ -f "$COOLIFY_SCRIPT" ]]; then
     log "Konfiguriere Coolify Projekte Autostart..." "$BLUE"
     bash "$COOLIFY_SCRIPT"
 fi
