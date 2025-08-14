@@ -6,3 +6,10 @@
 # Kilo Code configuration
 .kilocode/
 
+# System files
+.DS_Store
+*.old
+
+# Temporary directories
+vps/
+

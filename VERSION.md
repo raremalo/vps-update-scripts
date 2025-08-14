@@ -1,5 +1,51 @@
 # VPS Script Collection - Version History
 
+## Version 3.0.0 - Enterprise Backup & Advanced Monitoring (2024-12-19)
+
+### 🚀 Major Release - Professional VPS Management Suite
+
+#### New Scripts Added:
+- **`backup-vps-data.sh`** - Standalone enterprise backup solution
+  - Automatic database dumps (PostgreSQL, MySQL, MongoDB, Redis)
+  - Remote backup support via SCP
+  - OpenSSL encryption support
+  - Intelligent volume backup with size limits
+  - Auto-generated restore scripts
+  
+- **`vps-update-simple.sh`** - Lightweight update alternative
+  - No backup overhead for quick updates
+  - Interactive reboot confirmation
+  - Colored terminal output for better UX
+
+#### Enhanced Scripts:
+- **`ensure-docker-autostart.sh`** - Extended monitoring capabilities
+  - Soketi port verification (Port 6001)
+  - System health checks (Memory, Disk, Network)
+  - Detailed container start verification
+  - Error handling with line tracking
+
+- **`vps-update-complete.sh`** - Full-featured update with backup
+  - Integrated database backups
+  - Critical volume prioritization
+  - Compressed backup archives
+  - Restore guide generation
+
+#### Key Improvements:
+- ✅ **Enterprise Backup**: Database dumps, remote sync, encryption
+- ✅ **Health Monitoring**: System resource checks before operations
+- ✅ **Soketi Support**: Improved Coolify real-time service handling
+- ✅ **Flexible Updates**: Choose between simple, standard, or complete updates
+- ✅ **Better Recovery**: Auto-generated restore guides with step-by-step instructions
+
+### 📊 Statistics:
+- **4 new scripts added**
+- **2 scripts significantly enhanced**
+- **2,539 lines of new code**
+- **Extended backup capabilities**
+- **Professional monitoring features**
+
+---
+
 ## Version 2.0.0 - Universal Docker Container Management (2024-12-19)
 
 ### 🚀 Major Features Added

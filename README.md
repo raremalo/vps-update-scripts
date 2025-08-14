@@ -4,8 +4,25 @@ Eine professionelle Lösung für automatisierte Updates von Ubuntu 24.04 LTS Ser
 
 ## 📋 Übersicht
 
-Diese Script-Suite bietet:
-- **vps-update.sh**: Hauptskript für System-Updates mit Docker/Coolify-Integration
+Diese erweiterte Script-Suite bietet:
+
+### Update-Skripte
+- **vps-update.sh**: Standard Update-Skript mit Docker/Coolify-Integration
+- **vps-update-complete.sh**: Erweitertes Update mit vollständigem Backup inkl. Datenbanken
+- **vps-update-simple.sh**: Vereinfachtes Update ohne Backup für schnelle Updates
+- **vps-update-with-backup.sh**: Update mit integrierter Backup-Funktion
+
+### Backup-Lösungen
+- **backup-vps-data.sh**: Standalone Backup mit Datenbank-Dumps, Remote-Support und Verschlüsselung
+- **backup-functions.sh**: Backup-Funktionsbibliothek für Integration
+
+### Docker-Management
+- **ensure-docker-autostart.sh**: Erweiterte Docker-Autostart-Konfiguration mit Health Checks
+- **ensure-coolify-projects-autostart.sh**: Coolify-Projekt-Autostart-Management
+- **fix-all-container-restart-policies.sh**: Universelle Restart-Policy-Konfiguration
+- **start-all-containers.sh**: Intelligenter Container-Start mit Prioritäten
+
+### Utilities
 - **installvps-update.sh**: Automatisches Installations- und Konfigurationsskript
 - **vps-status.sh**: Quick-Status-Check für System und Services
 
@@ -28,6 +45,13 @@ sudo ./installvps-update.sh
 - ✅ Automatische Log-Rotation
 - ✅ Lock-File-Mechanismus gegen parallele Ausführungen
 - ✅ Konfigurierbare Paket-Holds (snapd, ubuntu-advantage-tools, etc.)
+
+### Neue Features (v3.0.0)
+- 🔥 **Erweiterte Backup-Funktionen**: Datenbank-Dumps, Remote-Backup, Verschlüsselung
+- 🔥 **System Health Checks**: Memory, Disk, Network-Monitoring
+- 🔥 **Soketi-Support**: Verbesserte Coolify Real-time Service Integration
+- 🔥 **Intelligente Volume-Sicherung**: Größenlimits und kritische Volume-Priorisierung
+- 🔥 **Restore-Guides**: Automatisch generierte Wiederherstellungsanleitungen
 
 ### Sicherheit
 - Root-Berechtigungsprüfung
@@ -66,9 +90,30 @@ Falls Systemd-Timer nicht gewünscht:
 
 ## 🔧 Verwendung
 
-### Manueller Update
+### Update-Varianten
+
+#### Standard Update
 ```bash
-sudo vps-update
+sudo vps-update.sh
+```
+
+#### Vollständiges Update mit erweitertem Backup
+```bash
+sudo vps-update-complete.sh
+```
+
+#### Schnelles Update ohne Backup
+```bash
+sudo vps-update-simple.sh
+```
+
+### Standalone Backup
+```bash
+# Vollständiges Backup mit Datenbanken
+sudo backup-vps-data.sh
+
+# Mit Remote-Backup
+REMOTE_BACKUP=true REMOTE_HOST=backup.server.com sudo backup-vps-data.sh
 ```
 
 ### System-Status prüfen
