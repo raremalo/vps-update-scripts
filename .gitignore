@@ -3,3 +3,6 @@
 *.txt
 *.lock
 
+# Kilo Code configuration
+.kilocode/
+
