@@ -23,6 +23,21 @@ LOG_FILE="$LOG_DIR/vps_update_$(date +%Y%m%d_%H%M%S).log"
 log() { echo -e "${2-}${1}${NC}"; echo "[$(date '+%F %T')] ${1//${NC}/}" >>"$LOG_FILE"; }
 err() { log "$*" "$RED"; }
 
+# ---- Compose/Container Helpers ----
+has_compose_project() {
+  docker compose config >/dev/null 2>&1
+}
+
+has_compose_service() {
+  local svc="$1"
+  docker compose config --services 2>/dev/null | grep -qx "$svc"
+}
+
+has_container() {
+  local name="$1"
+  docker ps -a --format '{{.Names}}' | grep -qx "$name"
+}
+
 cleanup() { rm -f "$LOCK_FILE"; }
 trap cleanup EXIT
 
@@ -108,7 +123,60 @@ if [[ -f "$AUTOSTART_SCRIPT" ]]; then
     bash "$AUTOSTART_SCRIPT"
 fi
 
-log "Starte Coolify neu, um alle Projekte zu reaktivieren..." "$BLUE"
-docker restart coolify 2>/dev/null || log "Coolify neustarten fehlgeschlagen." "$YELLOW"
+# Robust: Coolify-Stack starten mit Compose-Check und Fallback
+start_coolify_stack() {
+  if [[ ! -d "/data/coolify/source" ]]; then
+    log "Coolify nicht installiert – überspringe Stack-Start." "$YELLOW"
+    return 0
+  fi
+  log "Starte Coolify-Stack in korrekter Reihenfolge..." "$BLUE"
+  cd /data/coolify/source || return 0
+  if has_compose_project; then
+    log "Starte DB/Redis..." "$BLUE"
+    docker compose up -d coolify-db coolify-redis || log "Compose: DB/Redis Start meldete Fehler" "$YELLOW"
+    sleep 10
+    if has_compose_service "coolify-realtime"; then
+      log "Starte Realtime (coolify-realtime)..." "$BLUE"
+      docker compose up -d coolify-realtime || log "Compose: coolify-realtime meldete Fehler" "$YELLOW"
+      sleep 5
+    elif has_compose_service "soketi"; then
+      log "Starte Legacy Realtime (soketi)..." "$BLUE"
+      docker compose up -d soketi || log "Compose: soketi meldete Fehler" "$YELLOW"
+      sleep 5
+    else
+      log "Kein Realtime-Service in Compose gefunden" "$YELLOW"
+    fi
+    log "Starte Coolify Core..." "$BLUE"
+    docker compose up -d coolify || log "Compose: coolify meldete Fehler" "$YELLOW"
+    sleep 10
+    log "Starte Proxy..." "$BLUE"
+    docker compose up -d coolify-proxy || log "Compose: proxy meldete Fehler" "$YELLOW"
+  else
+    log "Compose-Projekt ungültig – Fallback via docker start" "$YELLOW"
+    docker start coolify-db coolify-redis 2>/dev/null || true
+    sleep 10
+    if has_container "coolify-realtime"; then
+      docker start coolify-realtime 2>/dev/null || true
+      sleep 5
+    elif has_container "soketi"; then
+      docker start soketi 2>/dev/null || true
+      sleep 5
+    fi
+    docker start coolify 2>/dev/null || true
+    sleep 10
+    docker start coolify-proxy 2>/dev/null || true
+  fi
+  # Verifikation
+  sleep 5
+  for s in coolify-db coolify-redis coolify-realtime coolify coolify-proxy; do
+    if docker ps | grep -q "$s"; then
+      log "✓ $s läuft" "$GREEN"
+    else
+      log "⚠ $s läuft nicht" "$YELLOW"
+    fi
+  done
+}
+
+start_coolify_stack
 
 log "======== Update abgeschlossen ========" "$GREEN"
