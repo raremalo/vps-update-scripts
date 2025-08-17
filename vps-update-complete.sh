@@ -406,6 +406,82 @@ start_coolify_stack() {
     done
 }
 
+# Startet Coolify-Projekte (individuell pro Server), falls vorhanden
+start_coolify_projects() {
+    # Nur ausführen, wenn Docker läuft und Coolify installiert ist
+    if ! command -v docker >/dev/null 2>&1; then
+        return 0
+    fi
+    if ! docker ps -a --format '{{.Names}}' | grep -q '^coolify$'; then
+        return 0
+    fi
+
+    log "INFO" "Starte Coolify-Projekte (Autostart + fehlende Netzwerke fixen)..."
+
+    # 1) Projekt-Container sammeln (Coolify label)
+    mapfile -t PROJECT_CONTAINERS < <(docker ps -a --filter "label=coolify.managed=true" --format '{{.Names}}' || true)
+
+    if [[ ${#PROJECT_CONTAINERS[@]} -eq 0 ]]; then
+        log "INFO" "Keine Coolify-Projekte gefunden (label=coolify.managed=true)"
+        return 0
+    fi
+
+    # 2) Reihenfolge bestimmen: DB/Cache zuerst
+    declare -a DB_FIRST=()
+    declare -a OTHERS=()
+    for cname in "${PROJECT_CONTAINERS[@]}"; do
+        if [[ -z "$cname" ]]; then continue; fi
+        if [[ "$cname" =~ (postgres|postgresql|mysql|mariadb|mongo|redis|dragonfly|db)(-|$) ]]; then
+            DB_FIRST+=("$cname")
+        else
+            OTHERS+=("$cname")
+        fi
+    done
+
+    start_list() {
+        local phase="$1"; shift
+        local containers=("$@")
+        if [[ ${#containers[@]} -eq 0 ]]; then return 0; fi
+        log "INFO" "Coolify-Projekte starten: $phase (${#containers[@]})"
+        for c in "${containers[@]}"; do
+            # Fehlende Netzwerke automatisch anlegen
+            local net
+            while IFS= read -r net; do
+                if [[ -n "$net" ]] && ! docker network inspect "$net" >/dev/null 2>&1; then
+                    log "INFO" "Erzeuge fehlendes Netzwerk: $net (für $c)"
+                    docker network create "$net" >/dev/null 2>&1 || log "WARNING" "Netzwerk $net konnte nicht erstellt werden"
+                fi
+            done < <(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{printf "%s\n" $k}}{{end}}' "$c" 2>/dev/null | sort -u)
+
+            # Restart-Policy sicherstellen
+            local rp
+            rp=$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$c" 2>/dev/null || echo "")
+            if [[ "$rp" != "always" && "$rp" != "unless-stopped" ]]; then
+                docker update --restart=unless-stopped "$c" > /dev/null 2>&1 || true
+            fi
+
+            # Starten, falls nicht running
+            local status
+            status=$(docker inspect -f '{{.State.Status}}' "$c" 2>/dev/null || echo "")
+            if [[ "$status" != "running" ]]; then
+                log "INFO" "Starte Coolify Projekt-Container: $c"
+                if ! docker start "$c" >/dev/null 2>&1; then
+                    # Zweiter Versuch nach kurzem Delay (z. B. wegen Netz-Abhängigkeiten)
+                    sleep 2
+                    docker start "$c" >/dev/null 2>&1 || log "WARNING" "Fehler beim Starten von $c"
+                fi
+            fi
+        done
+    }
+
+    # Startphase: DB/Cache, dann Rest
+    start_list "Datenbanken/Cache" "${DB_FIRST[@]}"
+    sleep 3
+    start_list "Anwendungen" "${OTHERS[@]}"
+
+    log "SUCCESS" "Coolify-Projekte gestartet"
+}
+
 start_other_containers() {
     log "INFO" "Starte andere Container mit Autostart..."
     
@@ -456,6 +532,9 @@ main() {
     
     # Coolify-Stack starten
     start_coolify_stack
+
+    # Coolify-Projekte starten (per-Server, anhand Labels/networks)
+    start_coolify_projects
     
     # Andere Container starten
     start_other_containers
