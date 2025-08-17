@@ -411,7 +411,7 @@ start_coolify_stack() {
 # Startet Coolify-Projekte (individuell pro Server), falls vorhanden
 start_coolify_projects() {
     # Nur ausführen, wenn Docker läuft und Coolify installiert ist
-    if ! command -v docker >/dev/null 2>&1; then
+    if ! command -v docker > /dev/null 2>&1; then
         return 0
     fi
     if ! docker ps -a --format '{{.Names}}' | grep -q '^coolify$'; then
@@ -440,6 +440,24 @@ start_coolify_projects() {
         fi
     done
 
+    # Hilfsfunktion: Start mit Backoff versuchen
+    try_start_with_backoff() {
+        local cname="$1"
+        local attempts=(2 5 10)
+        # erster Versuch sofort
+        if docker start "$cname" > /dev/null 2>&1; then
+            return 0
+        fi
+        for d in "${attempts[@]}"; do
+            log "INFO" "Start-Retry in ${d}s: $cname"
+            sleep "$d"
+            if docker start "$cname" > /dev/null 2>&1; then
+                return 0
+            fi
+        done
+        return 1
+    }
+
     start_list() {
         local phase="$1"; shift
         local containers=("$@")
@@ -449,9 +467,9 @@ start_coolify_projects() {
             # Fehlende Netzwerke automatisch anlegen
             local net
             while IFS= read -r net; do
-                if [[ -n "$net" ]] && ! docker network inspect "$net" >/dev/null 2>&1; then
+                if [[ -n "$net" ]] && ! docker network inspect "$net" > /dev/null 2>&1; then
                     log "INFO" "Erzeuge fehlendes Netzwerk: $net (für $c)"
-                    docker network create "$net" >/dev/null 2>&1 || log "WARNING" "Netzwerk $net konnte nicht erstellt werden"
+                    docker network create "$net" > /dev/null 2>&1 || log "WARNING" "Netzwerk $net konnte nicht erstellt werden"
                 fi
             done < <(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{printf "%s\n" $k}}{{end}}' "$c" 2>/dev/null | sort -u)
 
@@ -467,10 +485,8 @@ start_coolify_projects() {
             status=$(docker inspect -f '{{.State.Status}}' "$c" 2>/dev/null || echo "")
             if [[ "$status" != "running" ]]; then
                 log "INFO" "Starte Coolify Projekt-Container: $c"
-                if ! docker start "$c" >/dev/null 2>&1; then
-                    # Zweiter Versuch nach kurzem Delay (z. B. wegen Netz-Abhängigkeiten)
-                    sleep 2
-                    docker start "$c" >/dev/null 2>&1 || log "WARNING" "Fehler beim Starten von $c"
+                if ! try_start_with_backoff "$c"; then
+                    log "WARNING" "Fehler beim Starten von $c (nach Retries)"
                 fi
             fi
         done
