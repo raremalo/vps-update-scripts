@@ -35,7 +35,8 @@ STATUS_SCRIPT_SRC="$SCRIPT_DIR/vps-status.sh"
 
 for f in "$UPDATE_SCRIPT_SRC" "$UPDATE_WITH_BACKUP_SRC" "$COMPLETE_UPDATE_SRC" "$BACKUP_FUNCTIONS_SRC" "$STATUS_SCRIPT_SRC"; do
     [[ -f "$f" ]] || { echo -e "${RED}Fehler: Quelldatei nicht gefunden: $(basename "$f")${NC}"; exit 1; }
-Done
+
+done
 
 echo -e "${BLUE}--- VPS Update Suite Installer ---${NC}"
 
