@@ -21,6 +21,8 @@ BACKUP_DATABASES=${VPS_UPDATE_BACKUP_DATABASES:-true}
 BACKUP_KEEP_DAYS=${VPS_UPDATE_KEEP_BACKUPS:-7}
 MIN_FREE_SPACE_MB=${VPS_UPDATE_MIN_FREE_SPACE_MB:-500}
 MAX_VOLUME_SIZE_MB=${VPS_UPDATE_MAX_VOLUME_SIZE_MB:-1000}
+# Erzwinge Start aller geeigneten Container (auch ohne gesetzte Restart-Policy)
+FORCE_START_ALL=${VPS_FORCE_START_ALL:-false}
 
 # =====================================
 # Hilfsfunktionen
@@ -488,6 +490,12 @@ start_other_containers() {
     docker ps -a --format '{{.Names}}' | grep -v "^coolify" | while read -r container; do
         if [[ -n "$container" ]]; then
             local restart_policy=$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$container" 2>/dev/null)
+
+            # Wenn FORCE_START_ALL aktiv ist und keine Policy gesetzt ist, setze unless-stopped
+            if [[ "$FORCE_START_ALL" == "true" ]] && [[ "$restart_policy" != "always" && "$restart_policy" != "unless-stopped" ]]; then
+                docker update --restart=unless-stopped "$container" >/dev/null 2>&1 || true
+                restart_policy="unless-stopped"
+            fi
             
             if [[ "$restart_policy" == "always" ]] || [[ "$restart_policy" == "unless-stopped" ]]; then
                 # Fehlende Netzwerke automatisch anlegen (Generalfall, nicht nur Coolify)
