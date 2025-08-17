@@ -26,15 +26,16 @@ BACKUP_FUNCTIONS_DEST="$LIB_DIR/backup-functions.sh"
 # Quelldateien
 UPDATE_SCRIPT_SRC="$SCRIPT_DIR/vps-update.sh"
 UPDATE_WITH_BACKUP_SRC="$SCRIPT_DIR/vps-update-with-backup.sh"
+COMPLETE_UPDATE_SRC="$SCRIPT_DIR/vps-update-complete.sh"
 BACKUP_FUNCTIONS_SRC="$SCRIPT_DIR/backup-functions.sh"
 STATUS_SCRIPT_SRC="$SCRIPT_DIR/vps-status.sh"
 
 # --- Vorab-Prüfungen ---
 [[ $EUID -eq 0 ]] || { echo -e "${RED}Fehler: Bitte dieses Skript mit sudo oder als root ausführen.${NC}"; exit 1; }
 
-for f in "$UPDATE_SCRIPT_SRC" "$UPDATE_WITH_BACKUP_SRC" "$BACKUP_FUNCTIONS_SRC" "$STATUS_SCRIPT_SRC"; do
+for f in "$UPDATE_SCRIPT_SRC" "$UPDATE_WITH_BACKUP_SRC" "$COMPLETE_UPDATE_SRC" "$BACKUP_FUNCTIONS_SRC" "$STATUS_SCRIPT_SRC"; do
     [[ -f "$f" ]] || { echo -e "${RED}Fehler: Quelldatei nicht gefunden: $(basename "$f")${NC}"; exit 1; }
-done
+Done
 
 echo -e "${BLUE}--- VPS Update Suite Installer ---${NC}"
 
@@ -60,6 +61,10 @@ else
     install -Dm755 "$UPDATE_SCRIPT_SRC" "$UPDATE_SCRIPT_DEST"
 fi
 
+# Immer auch das vollständige Update-Skript bereitstellen (für Timer)
+echo "Installiere vps-update-complete.sh..."
+install -Dm755 "$COMPLETE_UPDATE_SRC" "/usr/local/bin/vps-update-complete.sh"
+
 echo "Installiere vps-status..."
 install -Dm755 "$STATUS_SCRIPT_SRC" "$STATUS_SCRIPT_DEST"
 
@@ -76,15 +81,16 @@ install -d -m755 /var/log/vps-updates
 read -r -p "Systemd-Timer (empfohlen) statt Cron anlegen? [Y/n] " TIMER_REPLY
 if [[ ${TIMER_REPLY,,} != n* ]]; then
     echo "Richte Systemd-Timer ein..."
-    cat >/etc/systemd/system/vps-update.service <<'EOF'
+cat > /etc/systemd/system/vps-update.service <<'EOF'
 [Unit]
-Description=VPS – wöchentliches Update inkl. Docker/Coolify
+Description=VPS – wöchentliches Update inkl. Docker/Coolify (Complete)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/vps-update
+# Nutze das vollständige Update-Skript mit Backup und robustem Coolify-Handling
+ExecStart=/usr/local/bin/vps-update-complete.sh
 Nice=10
 IOSchedulingClass=best-effort
 IOSchedulingPriority=6

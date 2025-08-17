@@ -31,6 +31,21 @@ log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$level] $*" | tee -a "$LOGFILE"
 }
 
+# Prüffunktionen für Compose/Container
+has_compose_project() {
+    docker compose config >/dev/null 2>&1
+}
+
+has_compose_service() {
+    local svc="$1"
+    docker compose config --services 2>/dev/null | grep -qx "$svc"
+}
+
+has_container() {
+    local name="$1"
+    docker ps -a --format '{{.Names}}' | grep -qx "$name"
+}
+
 cleanup() {
     rm -f "$LOCKFILE"
 }
@@ -327,29 +342,61 @@ start_coolify_stack() {
     
     log "INFO" "Starte Coolify-Stack in korrekter Reihenfolge..."
     cd /data/coolify/source
-    
-    # 1. Datenbank und Cache zuerst
-    log "INFO" "Starte Datenbank und Redis..."
-    docker compose up -d coolify-db coolify-redis
-    sleep 10  # Warte auf Initialisierung
-    
-    # 2. Soketi/Realtime als nächstes
-    log "INFO" "Starte Soketi Realtime-Service..."
-    docker compose up -d coolify-realtime
-    sleep 5  # Warte auf Soketi
-    
-    # 3. Hauptcontainer
-    log "INFO" "Starte Coolify Hauptcontainer..."
-    docker compose up -d coolify
-    sleep 10  # Warte auf Coolify
-    
-    # 4. Proxy zuletzt
-    log "INFO" "Starte Coolify Proxy..."
-    docker compose up -d coolify-proxy
+
+    if has_compose_project; then
+        # 1. Datenbank und Cache zuerst
+        log "INFO" "Starte Datenbank und Redis..."
+        docker compose up -d coolify-db coolify-redis || log "WARNING" "Compose: DB/Redis Start meldete Fehler"
+        sleep 10  # Warte auf Initialisierung
+        
+        # 2. Realtime/Soketi als nächstes (nur wenn als Service vorhanden)
+        if has_compose_service "coolify-realtime"; then
+            log "INFO" "Starte Realtime-Service (coolify-realtime)..."
+            docker compose up -d coolify-realtime || log "WARNING" "Compose: coolify-realtime Start meldete Fehler"
+            sleep 5
+        elif has_compose_service "soketi"; then
+            log "INFO" "Starte Legacy Realtime-Service (soketi)..."
+            docker compose up -d soketi || log "WARNING" "Compose: soketi Start meldete Fehler"
+            sleep 5
+        else
+            log "INFO" "Kein Realtime-Service (coolify-realtime/soketi) in Compose gefunden"
+        fi
+        
+        # 3. Hauptcontainer
+        log "INFO" "Starte Coolify Hauptcontainer..."
+        docker compose up -d coolify || log "WARNING" "Compose: coolify Start meldete Fehler"
+        sleep 10
+        
+        # 4. Proxy zuletzt
+        log "INFO" "Starte Coolify Proxy..."
+        docker compose up -d coolify-proxy || log "WARNING" "Compose: Proxy Start meldete Fehler"
+    else
+        # Fallback: Ungültiges Compose-Projekt – Container direkt starten
+        log "WARNING" "Compose-Projekt ungültig – starte Container direkt per docker start"
+        docker start coolify-db coolify-redis 2>/dev/null || true
+        sleep 10
+        if has_container "coolify-realtime"; then
+            log "INFO" "Starte Container coolify-realtime (Fallback)"
+            docker start coolify-realtime 2>/dev/null || true
+            sleep 5
+        elif has_container "soketi"; then
+            log "INFO" "Starte Container soketi (Fallback)"
+            docker start soketi 2>/dev/null || true
+            sleep 5
+        fi
+        log "INFO" "Starte Coolify Hauptcontainer (Fallback)"
+        docker start coolify 2>/dev/null || true
+        sleep 10
+        log "INFO" "Starte Coolify Proxy (Fallback)"
+        docker start coolify-proxy 2>/dev/null || true
+    fi
     
     # Verifiziere, dass alle Services laufen
     sleep 5
-    local services=("coolify-db" "coolify-redis" "coolify-realtime" "coolify" "coolify-proxy")
+    local services=("coolify-db" "coolify-redis" "coolify" "coolify-proxy")
+    if has_container "coolify-realtime"; then
+        services=("coolify-db" "coolify-redis" "coolify-realtime" "coolify" "coolify-proxy")
+    fi
     for service in "${services[@]}"; do
         if docker ps | grep -q "$service"; then
             log "SUCCESS" "✓ $service läuft"
