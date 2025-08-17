@@ -490,8 +490,20 @@ start_other_containers() {
             local restart_policy=$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$container" 2>/dev/null)
             
             if [[ "$restart_policy" == "always" ]] || [[ "$restart_policy" == "unless-stopped" ]]; then
+                # Fehlende Netzwerke automatisch anlegen (Generalfall, nicht nur Coolify)
+                local net
+                while IFS= read -r net; do
+                    if [[ -n "$net" ]] && ! docker network inspect "$net" >/dev/null 2>&1; then
+                        log "INFO" "Erzeuge fehlendes Netzwerk: $net (für $container)"
+                        docker network create "$net" >/dev/null 2>&1 || log "WARNING" "Netzwerk $net konnte nicht erstellt werden"
+                    fi
+                done < <(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{printf "%s\n" $k}}{{end}}' "$container" 2>/dev/null | sort -u)
+
                 log "INFO" "Starte Container: $container"
-                docker start "$container" || log "WARNING" "Fehler beim Starten von $container"
+                if ! docker start "$container" >/dev/null 2>&1; then
+                    sleep 2
+                    docker start "$container" >/dev/null 2>&1 || log "WARNING" "Fehler beim Starten von $container"
+                fi
             fi
         fi
     done
