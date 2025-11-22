@@ -1,0 +1,14 @@
+[Unit]
+Description=Docker Autostart Service für Coolify
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/vps-script/ensure-docker-autostart-coolify.sh
+RemainAfterExit=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

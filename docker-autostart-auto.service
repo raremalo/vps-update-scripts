@@ -1,0 +1,14 @@
+[Unit]
+Description=Docker Autostart Service (Auto-Detect Coolify/Dokploy)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/ensure-docker-autostart-auto.sh
+RemainAfterExit=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
