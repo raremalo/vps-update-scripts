@@ -80,52 +80,85 @@ start_coolify_stack() {
     
     log "=== Starte Coolify-Stack ==="
     cd /data/coolify/source
-    
-    # 1. Datenbank und Redis
-    log "Starte Datenbank-Services..."
-    docker compose up -d coolify-db coolify-redis 2>&1 | tee -a "$LOGFILE"
-    
-    wait_for_container "coolify-db" || true
-    wait_for_container "coolify-redis" || true
-    
-    # Extra Wartezeit für DB-Initialisierung
-    log "Warte auf Datenbank-Initialisierung..."
-    sleep 10
-    
-    # 2. Soketi Realtime Service
-    log "Starte Soketi Realtime-Service..."
-    docker compose up -d coolify-realtime 2>&1 | tee -a "$LOGFILE"
-    
-    if wait_for_container "coolify-realtime"; then
-        # Teste Soketi-Port
-        if nc -z localhost 6001 2>/dev/null; then
-            log "✓ Soketi Port 6001 ist erreichbar"
-        else
-            log "WARNING: Soketi Port 6001 nicht erreichbar"
-        fi
-    fi
-    
-    # 3. Coolify Hauptcontainer
-    log "Starte Coolify Hauptcontainer..."
-    docker compose up -d coolify 2>&1 | tee -a "$LOGFILE"
-    
-    if wait_for_container "coolify"; then
-        # Warte auf Coolify-Initialisierung
-        sleep 15
+
+    # Helper: check compose validity
+    has_compose_project() {
+        docker compose config >/dev/null 2>&1
+    }
+    has_compose_service() {
+        local svc="$1"
+        docker compose config --services 2>/dev/null | grep -qx "$svc"
+    }
+
+    if has_compose_project; then
+        # 1. Datenbank und Redis
+        log "Starte Datenbank-Services..."
+        docker compose up -d coolify-db coolify-redis 2>&1 | tee -a "$LOGFILE"
         
-        # Teste Coolify-Port
-        if nc -z localhost 8000 2>/dev/null; then
-            log "✓ Coolify Port 8000 ist erreichbar"
+        wait_for_container "coolify-db" || true
+        wait_for_container "coolify-redis" || true
+        
+        # Extra Wartezeit für DB-Initialisierung
+        log "Warte auf Datenbank-Initialisierung..."
+        sleep 10
+        
+        # 2. Realtime Service (coolify-realtime bevorzugt)
+        if has_compose_service "coolify-realtime"; then
+            log "Starte Realtime-Service (coolify-realtime)..."
+            docker compose up -d coolify-realtime 2>&1 | tee -a "$LOGFILE"
+            wait_for_container "coolify-realtime" || true
+        elif has_compose_service "soketi"; then
+            log "Starte Legacy Realtime-Service (soketi)..."
+            docker compose up -d soketi 2>&1 | tee -a "$LOGFILE"
+            wait_for_container "soketi" || true
         else
-            log "WARNING: Coolify Port 8000 nicht erreichbar"
+            log "Kein Realtime-Service in Compose gefunden"
         fi
+        
+        # 3. Coolify Hauptcontainer
+        log "Starte Coolify Hauptcontainer..."
+        docker compose up -d coolify 2>&1 | tee -a "$LOGFILE"
+        
+        if wait_for_container "coolify"; then
+            # Warte auf Coolify-Initialisierung
+            sleep 15
+            
+            # Teste Coolify-Port
+            if nc -z localhost 8000 2>/dev/null; then
+                log "✓ Coolify Port 8000 ist erreichbar"
+            else
+                log "WARNING: Coolify Port 8000 nicht erreichbar"
+            fi
+        fi
+        
+        # 4. Proxy
+        log "Starte Coolify Proxy..."
+        docker compose up -d coolify-proxy 2>&1 | tee -a "$LOGFILE"
+        
+        wait_for_container "coolify-proxy" || true
+    else
+        log "Compose-Projekt ungültig – Fallback via docker start"
+        docker start coolify-db coolify-redis 2>/dev/null || true
+        wait_for_container "coolify-db" || true
+        wait_for_container "coolify-redis" || true
+        log "Warte auf Datenbank-Initialisierung..."
+        sleep 10
+        if docker ps -a --format '{{.Names}}' | grep -q '^coolify-realtime$'; then
+            log "Starte Realtime (coolify-realtime)"
+            docker start coolify-realtime 2>/dev/null || true
+            wait_for_container "coolify-realtime" || true
+        elif docker ps -a --format '{{.Names}}' | grep -q '^soketi$'; then
+            log "Starte Legacy Realtime (soketi)"
+            docker start soketi 2>/dev/null || true
+            wait_for_container "soketi" || true
+        fi
+        log "Starte Coolify Hauptcontainer (Fallback)"
+        docker start coolify 2>/dev/null || true
+        wait_for_container "coolify" || true
+        log "Starte Coolify Proxy (Fallback)"
+        docker start coolify-proxy 2>/dev/null || true
+        wait_for_container "coolify-proxy" || true
     fi
-    
-    # 4. Proxy
-    log "Starte Coolify Proxy..."
-    docker compose up -d coolify-proxy 2>&1 | tee -a "$LOGFILE"
-    
-    wait_for_container "coolify-proxy" || true
     
     # Finale Verifizierung
     log "=== Coolify Status-Check ==="
