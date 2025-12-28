@@ -92,10 +92,26 @@ wait_for_docker() {
 start_coolify() {
     log "Starte Coolify-Services..."
     
-    if [[ -n "$DEPLOYMENT_PATH" ]]; then
+    if [[ -n "$DEPLOYMENT_PATH" ]] && [[ -f "$DEPLOYMENT_PATH/docker-compose.yml" ]]; then
         cd "$DEPLOYMENT_PATH"
-        log "Verwende docker-compose aus $DEPLOYMENT_PATH"
-        docker compose up -d 2>/dev/null || docker-compose up -d
+        log "Verwende docker-compose mit korrekter Startreihenfolge aus $DEPLOYMENT_PATH"
+        
+        # KRITISCH: Starte in der richtigen Reihenfolge!
+        log "→ Starte DB und Redis..."
+        docker compose up -d coolify-db coolify-redis 2>/dev/null || docker-compose up -d coolify-db coolify-redis
+        sleep 10
+        
+        log "→ Starte Realtime (Soketi)..."
+        docker compose up -d coolify-realtime 2>/dev/null || docker-compose up -d coolify-realtime
+        sleep 10
+        
+        log "→ Starte Coolify Hauptcontainer..."
+        docker compose up -d coolify 2>/dev/null || docker-compose up -d coolify
+        sleep 10
+        
+        log "→ Starte Proxy..."
+        docker compose up -d coolify-proxy 2>/dev/null || docker-compose up -d coolify-proxy
+        sleep 5
     else
         log "Starte Container manuell (kein docker-compose.yml gefunden)..."
         

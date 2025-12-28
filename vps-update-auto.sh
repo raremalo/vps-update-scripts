@@ -231,9 +231,8 @@ start_coolify_stack() {
         docker compose up -d coolify-db coolify-redis 2>/dev/null || docker-compose up -d coolify-db coolify-redis
         sleep 10
         
-        # 2. Soketi (Realtime)
+        # 2. Soketi (Realtime) - KRITISCH!
         # HINWEIS: Ältere Coolify-Versionen verwenden "soketi", neuere "coolify-realtime"
-        # docker-compose up -d versucht beide Namen falls vorhanden
         log "INFO" "Starte Soketi (Realtime Service)..."
         docker compose up -d coolify-realtime 2>/dev/null || docker-compose up -d coolify-realtime
         sleep 10
