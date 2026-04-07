@@ -9,7 +9,7 @@ shopt -s nullglob
 
 # -------------------- Konfigurierbare Variablen ----------------
 LOG_DIR="${VPS_UPDATE_LOG_DIR:-/var/log/vps-updates}"
-LOCK_FILE="/tmp/vps_update.lock"
+LOCK_FILE="/var/run/vps-update.lock"
 DOCKER_STOP_TIMEOUT="${DOCKER_STOP_TIMEOUT:-30}"
 HOLD_PKGS=(snapd ubuntu-advantage-tools landscape-common)
 
@@ -34,11 +34,11 @@ cleanup() { rm -f "$LOCK_FILE"; }
 trap cleanup EXIT
 
 [[ $EUID -eq 0 ]] || { err "Dieses Script muss als root laufen!"; exit 1; }
-[[ ! -e $LOCK_FILE ]] || { err "Lock-File existiert – Script läuft bereits."; exit 1; }
-touch "$LOCK_FILE"
+exec 9>"$LOCK_FILE"
+flock -n 9 || { err "Script läuft bereits (Lock: $LOCK_FILE)."; exit 1; }
 
 # Backup-Funktionen einbinden (wenn Backups aktiviert sind)
-if [[ "$BACKUP_ENABLED" == "true" ]]; then
+if [[ "$BACKUP_ENABLED" != "false" ]]; then
     if [[ -f "$BACKUP_FUNCTIONS_PATH" ]]; then
         # shellcheck source=/dev/null
         source "$BACKUP_FUNCTIONS_PATH"

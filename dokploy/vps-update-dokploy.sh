@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # vps-update-dokploy.sh
 # VPS Update-Skript optimiert für Dokploy
 # Angepasst von vps-update-coolify-optimized.sh
@@ -40,13 +40,9 @@ check_prerequisites() {
         exit 1
     fi
 
-    # Lock-File Check
-    if [[ -f "$LOCKFILE" ]]; then
-        log "ERROR" "Update läuft bereits (Lockfile: $LOCKFILE)"
-        exit 1
-    fi
-    
-    touch "$LOCKFILE"
+    # Atomic lock
+    exec 9>"$LOCKFILE"
+    flock -n 9 || { log "ERROR" "Script läuft bereits (Lock: $LOCKFILE)"; exit 1; }
     
     # Finde Dokploy-Installationspfad
     detect_dokploy_path
@@ -72,7 +68,7 @@ detect_dokploy_path() {
     done
     
     # Falls nicht gefunden, prüfe ob Dokploy-Container laufen
-    if docker ps | grep -q "dokploy/dokploy"; then
+    if docker ps --format '{{.Names}}' | grep -qx "dokploy"; then
         log "WARNING" "Dokploy-Container laufen, aber docker-compose.yml nicht gefunden"
         log "INFO" "Verwende Docker-Befehle statt docker-compose"
         DOKPLOY_PATH=""
@@ -87,7 +83,7 @@ stop_docker_containers() {
     log "INFO" "Stoppe Docker-Container..."
     
     # Dokploy-spezifische Reihenfolge (OHNE Soketi, da nicht vorhanden)
-    if docker ps | grep -q dokploy; then
+    if docker ps -a --format '{{.Names}}' | grep -q "dokploy"; then
         log "INFO" "Dokploy erkannt - stoppe in korrekter Reihenfolge..."
         
         # 1. Stoppe zuerst Traefik (Proxy)
@@ -147,7 +143,7 @@ update_system() {
 }
 
 start_dokploy_stack() {
-    if ! docker ps -a | grep -q dokploy; then
+    if ! docker ps -a --format '{{.Names}}' | grep -q "dokploy"; then
         log "INFO" "Dokploy nicht installiert"
         return 0
     fi
@@ -197,25 +193,25 @@ start_dokploy_stack() {
     # Verifiziere dass Services laufen
     log "INFO" "Verifiziere Dokploy-Services..."
     
-    if docker ps | grep -q "dokploy-postgres"; then
+    if docker ps --format '{{.Names}}' | grep -qx "dokploy-postgres"; then
         log "SUCCESS" "✓ Dokploy PostgreSQL läuft"
     else
         log "WARNING" "✗ Dokploy PostgreSQL läuft nicht!"
     fi
     
-    if docker ps | grep -q "dokploy-redis"; then
+    if docker ps --format '{{.Names}}' | grep -qx "dokploy-redis"; then
         log "SUCCESS" "✓ Dokploy Redis läuft"
     else
         log "WARNING" "✗ Dokploy Redis läuft nicht!"
     fi
-    
-    if docker ps | grep -q "dokploy/dokploy"; then
+
+    if docker ps --format '{{.Names}}' | grep -qx "dokploy"; then
         log "SUCCESS" "✓ Dokploy Hauptservice läuft"
     else
         log "ERROR" "✗ Dokploy Hauptservice läuft nicht!"
     fi
-    
-    if docker ps | grep -q "dokploy-traefik"; then
+
+    if docker ps --format '{{.Names}}' | grep -qx "dokploy-traefik"; then
         log "SUCCESS" "✓ Traefik Proxy läuft"
     else
         log "WARNING" "✗ Traefik Proxy läuft nicht!"
@@ -248,9 +244,9 @@ check_reboot_required() {
     if [[ -f /var/run/reboot-required ]]; then
         log "WARNING" "=== NEUSTART ERFORDERLICH ==="
         log "WARNING" "Gründe:"
-        cat /var/run/reboot-required.pkgs 2>/dev/null | while read -r pkg; do
+        while read -r pkg; do
             log "WARNING" "  - $pkg"
-        done
+        done < <(cat /var/run/reboot-required.pkgs 2>/dev/null)
         
         log "INFO" "Starte Neustart in 30 Sekunden..."
         log "INFO" "Drücken Sie Ctrl+C zum Abbrechen"

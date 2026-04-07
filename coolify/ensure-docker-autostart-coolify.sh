@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # ensure-docker-autostart-coolify.sh
 # Stellt sicher, dass Docker-Container nach Reboot in korrekter Reihenfolge starten
 # Optimiert für Coolify mit Soketi-Support
@@ -52,7 +52,7 @@ detect_coolify_path() {
 
 # Starte Coolify in korrekter Reihenfolge
 start_coolify() {
-    if ! docker ps -a | grep -q coolify; then
+    if ! docker ps -a --format '{{.Names}}' | grep -q "coolify"; then
         log "Coolify nicht installiert, überspringe..."
         return 0
     fi
@@ -99,31 +99,31 @@ start_coolify() {
     
     log "Verifiziere Coolify-Services..."
     
-    if docker ps | grep -q "coolify-db"; then
+    if docker ps --format '{{.Names}}' | grep -qx "coolify-db"; then
         log "✓ Coolify Database läuft"
     else
         log "✗ WARNING: Coolify Database läuft nicht!"
     fi
     
-    if docker ps | grep -q "coolify-redis"; then
+    if docker ps --format '{{.Names}}' | grep -qx "coolify-redis"; then
         log "✓ Coolify Redis läuft"
     else
         log "✗ WARNING: Coolify Redis läuft nicht!"
     fi
     
-    if docker ps | grep -q "coolify-realtime"; then
+    if docker ps --format '{{.Names}}' | grep -qx "coolify-realtime"; then
         log "✓ Coolify Soketi (Realtime) läuft"
     else
         log "✗ CRITICAL: Coolify Soketi läuft nicht! Coolify benötigt diesen Service!"
     fi
     
-    if docker ps | grep "^coolify" | grep -qv "coolify-"; then
+    if docker ps --format '{{.Names}}' | grep -qx "coolify"; then
         log "✓ Coolify Hauptservice läuft"
     else
         log "✗ WARNING: Coolify Hauptservice läuft nicht!"
     fi
     
-    if docker ps | grep -q "coolify-proxy"; then
+    if docker ps --format '{{.Names}}' | grep -qx "coolify-proxy"; then
         log "✓ Coolify Proxy läuft"
     else
         log "✗ WARNING: Coolify Proxy läuft nicht!"
@@ -135,17 +135,17 @@ start_other_containers() {
     log "Starte andere Container mit Restart-Policy..."
     
     # Finde alle Container die nicht laufen aber restart policy haben
-    docker ps -a --format '{{.Names}}' | grep -v "^coolify" | while read -r container; do
+    while read -r container; do
         if [[ -n "$container" ]]; then
             local state=$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null || echo "false")
             local restart_policy=$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$container" 2>/dev/null || echo "")
-            
+
             if [[ "$state" == "false" ]] && ([[ "$restart_policy" == "always" ]] || [[ "$restart_policy" == "unless-stopped" ]]); then
                 log "Starte Container: $container"
                 docker start "$container" 2>/dev/null || log "Fehler beim Starten von $container"
             fi
         fi
-    done
+    done < <(docker ps -a --format '{{.Names}}' | grep -v "^coolify")
 }
 
 # Hauptfunktion

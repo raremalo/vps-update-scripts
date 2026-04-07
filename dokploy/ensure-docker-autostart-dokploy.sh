@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # ensure-docker-autostart-dokploy.sh
 # Stellt sicher, dass Docker-Container nach Reboot in korrekter Reihenfolge starten
 # Optimiert für Dokploy (angepasst von Coolify-Version)
@@ -53,7 +53,7 @@ detect_dokploy_path() {
 
 # Starte Dokploy in korrekter Reihenfolge
 start_dokploy() {
-    if ! docker ps -a | grep -q dokploy; then
+    if ! docker ps -a --format '{{.Names}}' | grep -q "dokploy"; then
         log "Dokploy nicht installiert, überspringe..."
         return 0
     fi
@@ -95,25 +95,25 @@ start_dokploy() {
     
     log "Verifiziere Dokploy-Services..."
     
-    if docker ps | grep -q "dokploy-postgres"; then
+    if docker ps --format '{{.Names}}' | grep -qx "dokploy-postgres"; then
         log "✓ Dokploy PostgreSQL läuft"
     else
         log "✗ WARNING: Dokploy PostgreSQL läuft nicht!"
     fi
-    
-    if docker ps | grep -q "dokploy-redis"; then
+
+    if docker ps --format '{{.Names}}' | grep -qx "dokploy-redis"; then
         log "✓ Dokploy Redis läuft"
     else
         log "✗ WARNING: Dokploy Redis läuft nicht!"
     fi
-    
-    if docker ps | grep -q "dokploy/dokploy"; then
+
+    if docker ps --format '{{.Names}}' | grep -qx "dokploy"; then
         log "✓ Dokploy Hauptservice läuft"
     else
         log "✗ WARNING: Dokploy Hauptservice läuft nicht!"
     fi
-    
-    if docker ps | grep -q "dokploy-traefik"; then
+
+    if docker ps --format '{{.Names}}' | grep -qx "dokploy-traefik"; then
         log "✓ Traefik Proxy läuft"
     else
         log "✗ WARNING: Traefik Proxy läuft nicht!"
@@ -125,17 +125,17 @@ start_other_containers() {
     log "Starte andere Container mit Restart-Policy..."
     
     # Finde alle Container die nicht laufen aber restart policy haben
-    docker ps -a --format '{{.Names}}' | grep -v "^dokploy" | while read -r container; do
+    while read -r container; do
         if [[ -n "$container" ]]; then
             local state=$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null || echo "false")
             local restart_policy=$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$container" 2>/dev/null || echo "")
-            
+
             if [[ "$state" == "false" ]] && ([[ "$restart_policy" == "always" ]] || [[ "$restart_policy" == "unless-stopped" ]]); then
                 log "Starte Container: $container"
                 docker start "$container" 2>/dev/null || log "Fehler beim Starten von $container"
             fi
         fi
-    done
+    done < <(docker ps -a --format '{{.Names}}' | grep -v "^dokploy")
 }
 
 # Hauptfunktion

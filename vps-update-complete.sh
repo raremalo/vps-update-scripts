@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # vps-update-complete.sh
 # VPS Update-Skript mit vollständigem Backup inkl. Anwendungsdaten
 # Features: Backup-Integration, Coolify-optimierte Start-Reihenfolge, Soketi-Support, 
@@ -100,7 +100,7 @@ backup_databases() {
     done
     
     # Coolify-spezifische Datenbank
-    if docker ps | grep -q "coolify-db"; then
+    if docker ps --format '{{.Names}}' | grep -qx "coolify-db"; then
         log "INFO" "Sichere Coolify-Datenbank..."
         docker exec coolify-db pg_dumpall -U postgres 2>/dev/null | \
             gzip > "$backup_path/databases/coolify_db_$(date +%Y%m%d_%H%M%S).sql.gz" || \
@@ -264,20 +264,16 @@ check_prerequisites() {
         exit 1
     fi
 
-    # Lock-File Check
-    if [[ -f "$LOCKFILE" ]]; then
-        log "ERROR" "Update läuft bereits (Lockfile: $LOCKFILE)"
-        exit 1
-    fi
-    
-    touch "$LOCKFILE"
+    # Atomic lock
+    exec 9>"$LOCKFILE"
+    flock -n 9 || { log "ERROR" "Script läuft bereits (Lock: $LOCKFILE)"; exit 1; }
 }
 
 stop_docker_containers() {
     log "INFO" "Stoppe Docker-Container..."
     
     # Coolify-spezifische Reihenfolge
-    if docker ps | grep -q coolify; then
+    if docker ps --format '{{.Names}}' | grep -q "coolify"; then
         log "INFO" "Coolify erkannt - stoppe in korrekter Reihenfolge..."
         
         # Stoppe zuerst Projekte und Proxy
@@ -400,7 +396,7 @@ start_coolify_stack() {
         services=("coolify-db" "coolify-redis" "coolify-realtime" "coolify" "coolify-proxy")
     fi
     for service in "${services[@]}"; do
-        if docker ps | grep -q "$service"; then
+        if docker ps --format '{{.Names}}' | grep -qx "$service"; then
             log "SUCCESS" "✓ $service läuft"
         else
             log "WARNING" "✗ $service läuft nicht!"
@@ -503,7 +499,7 @@ start_coolify_projects() {
 start_other_containers() {
     log "INFO" "Starte andere Container mit Autostart..."
     
-    docker ps -a --format '{{.Names}}' | grep -v "^coolify" | while read -r container; do
+    while read -r container; do
         if [[ -n "$container" ]]; then
             local restart_policy=$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$container" 2>/dev/null)
 
@@ -530,8 +526,8 @@ start_other_containers() {
                 fi
             fi
         fi
-    done
-    
+    done < <(docker ps -a --format '{{.Names}}' | grep -v "^coolify")
+
     log "SUCCESS" "Container-Start abgeschlossen"
 }
 

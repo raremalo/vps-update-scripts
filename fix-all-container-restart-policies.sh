@@ -4,7 +4,7 @@
 # Basierend auf der Analyse der script.txt - setzt alle Container auf unless-stopped
 # ==============================================================
 
-set -eo pipefail
+set -euo pipefail
 
 # Farben
 RED='\033[0;31m'

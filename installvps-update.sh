@@ -37,10 +37,10 @@ echo ""
 log "Erkenne Deployment-System..." "$BLUE"
 
 DETECTED="none"
-if docker ps -a 2>/dev/null | grep -q "coolify"; then
+if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "coolify"; then
     DETECTED="coolify"
     log "✓ Coolify erkannt" "$GREEN"
-elif docker ps -a 2>/dev/null | grep -q "dokploy"; then
+elif docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "dokploy"; then
     DETECTED="dokploy"
     log "✓ Dokploy erkannt" "$GREEN"
 else
@@ -64,6 +64,10 @@ if [[ -f "$SCRIPT_DIR/vps-update-auto.sh" ]]; then
     
     log "→ ensure-docker-autostart-auto" "$GREEN"
     install -Dm755 "$SCRIPT_DIR/ensure-docker-autostart-auto.sh" "$LIB_DIR/ensure-docker-autostart-auto.sh"
+
+    # Symlink für Kompatibilität (vps-update.sh/vps-update-with-backup.sh referenzieren diesen Pfad)
+    ln -sf "$LIB_DIR/ensure-docker-autostart-auto.sh" "$LIB_DIR/ensure-docker-autostart.sh"
+    log "  → Symlink: ensure-docker-autostart.sh → ensure-docker-autostart-auto.sh" "$GREEN"
     
     # Systemd Service
     if [[ -f "$SCRIPT_DIR/docker-autostart-auto.service" ]]; then

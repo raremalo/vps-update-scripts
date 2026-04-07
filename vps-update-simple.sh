@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # vps-update-simple.sh
 # Vereinfachtes VPS Update-Skript ohne Backup
 # Features: Minimale Komplexität, Coolify-Start-Reihenfolge, Fokus auf Stabilität
@@ -58,31 +58,32 @@ check_root() {
 }
 
 check_lock() {
-    if [[ -f "$LOCKFILE" ]]; then
-        log_error "Update läuft bereits (Lockfile: $LOCKFILE)"
-        exit 1
-    fi
-    touch "$LOCKFILE"
+    exec 9>"$LOCKFILE"
+    flock -n 9 || { log_error "Script läuft bereits (Lock: $LOCKFILE)"; exit 1; }
 }
 
 stop_containers() {
     log "Stoppe Docker-Container..."
     
     # Coolify-spezifische Behandlung
-    if docker ps | grep -q coolify; then
+    if docker ps --format '{{.Names}}' | grep -q "coolify"; then
         log "Coolify erkannt - stoppe in korrekter Reihenfolge..."
-        
+
         # Stoppe Services in umgekehrter Abhängigkeitsreihenfolge
         for service in coolify-proxy coolify coolify-realtime coolify-redis coolify-db; do
-            if docker ps | grep -q "$service"; then
+            if docker ps --format '{{.Names}}' | grep -qx "$service"; then
                 log "Stoppe $service..."
                 docker stop "$service" 2>/dev/null || log_warning "Konnte $service nicht stoppen"
             fi
         done
     fi
     
-    # Stoppe alle anderen laufenden Container
-    local other_containers=$(docker ps -q --filter "name=^(?!coolify).*")
+    # Stoppe alle anderen laufenden Container (nicht-Coolify)
+    local other_containers
+    other_containers=$(docker ps -q | while read -r cid; do
+        cname=$(docker inspect --format '{{.Name}}' "$cid" | sed 's/^\///')
+        [[ "$cname" != coolify* ]] && echo "$cid"
+    done)
     if [[ -n "$other_containers" ]]; then
         log "Stoppe andere Container..."
         docker stop $other_containers 2>/dev/null || true
@@ -145,7 +146,7 @@ start_coolify() {
     # Verifiziere wichtige Services
     local all_running=true
     for service in coolify-db coolify-redis coolify-realtime coolify coolify-proxy; do
-        if docker ps | grep -q "$service"; then
+        if docker ps --format '{{.Names}}' | grep -qx "$service"; then
             log_success "$service läuft"
         else
             log_warning "$service läuft nicht"
@@ -164,7 +165,7 @@ start_other_containers() {
     log "Starte andere Container..."
     
     local count=0
-    docker ps -a --format '{{.Names}}' | grep -v "^coolify" | while read -r container; do
+    while read -r container; do
         if [[ -z "$container" ]]; then
             continue
         fi
@@ -179,8 +180,8 @@ start_other_containers() {
                 log_warning "Fehler bei: $container"
             fi
         fi
-    done
-    
+    done < <(docker ps -a --format '{{.Names}}' | grep -v "^coolify")
+
     log_success "Container-Start abgeschlossen"
 }
 

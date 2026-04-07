@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # ensure-docker-autostart-coolify.sh
 # Stellt sicher, dass Docker-Container nach Reboot in korrekter Reihenfolge starten
 # Features: Docker-Wartezeit, Coolify-Stack-Reihenfolge, Soketi-Verifizierung
@@ -49,7 +49,7 @@ wait_for_container() {
     local max_wait="${2:-$MAX_WAIT_SERVICE}"
     local elapsed=0
     
-    while ! docker ps | grep -q "$container_name"; do
+    while ! docker ps --format '{{.Names}}' | grep -qx "$container_name"; do
         if [[ $elapsed -ge $max_wait ]]; then
             log "WARNING: $container_name nicht gestartet nach ${max_wait} Sekunden"
             return 1
@@ -165,7 +165,7 @@ start_coolify_stack() {
     local all_running=true
     
     for service in coolify-db coolify-redis coolify-realtime coolify coolify-proxy; do
-        if docker ps | grep -q "$service"; then
+        if docker ps --format '{{.Names}}' | grep -qx "$service"; then
             local status=$(docker inspect -f '{{.State.Status}}' "$service" 2>/dev/null)
             local health=$(docker inspect -f '{{.State.Health.Status}}' "$service" 2>/dev/null || echo "no healthcheck")
             log "✓ $service: Status=$status, Health=$health"
@@ -192,7 +192,7 @@ start_other_containers() {
     local failed_count=0
     
     # Finde alle Container mit restart-policy always/unless-stopped
-    docker ps -a --format '{{.Names}}' | grep -v "^coolify" | while read -r container; do
+    while read -r container; do
         if [[ -z "$container" ]]; then
             continue
         fi
@@ -209,7 +209,7 @@ start_other_containers() {
                 sleep 2
                 
                 # Verifiziere Start
-                if docker ps | grep -q "$container"; then
+                if docker ps --format '{{.Names}}' | grep -qx "$container"; then
                     log "✓ $container erfolgreich gestartet"
                 else
                     log "✗ $container gestartet aber nicht laufend"
@@ -220,8 +220,8 @@ start_other_containers() {
                 ((failed_count++))
             fi
         fi
-    done
-    
+    done < <(docker ps -a --format '{{.Names}}' | grep -v "^coolify")
+
     log "Container-Start abgeschlossen: $started_count erfolgreich, $failed_count fehlgeschlagen"
 }
 
@@ -289,7 +289,6 @@ error_handler() {
     exit 1
 }
 
-trap 'error_handler $LINENO' ERR
-
 # Führe Hauptprogramm aus
+trap 'error_handler $LINENO' ERR
 main "$@"

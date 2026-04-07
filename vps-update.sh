@@ -8,7 +8,7 @@ shopt -s nullglob
 
 # -------------------- Konfigurierbare Variablen ----------------
 LOG_DIR="${VPS_UPDATE_LOG_DIR:-/var/log/vps-updates}"
-LOCK_FILE="/tmp/vps_update.lock"
+LOCK_FILE="/var/run/vps-update.lock"
 DOCKER_STOP_TIMEOUT="${DOCKER_STOP_TIMEOUT:-30}"
 HOLD_PKGS=(snapd ubuntu-advantage-tools landscape-common)
 # ---------------------------------------------------------------
@@ -42,8 +42,8 @@ cleanup() { rm -f "$LOCK_FILE"; }
 trap cleanup EXIT
 
 [[ $EUID -eq 0 ]] || { err "Dieses Script muss als root laufen!"; exit 1; }
-[[ ! -e $LOCK_FILE ]] || { err "Lock-File existiert – Script läuft bereits."; exit 1; }
-touch "$LOCK_FILE"
+exec 9>"$LOCK_FILE"
+flock -n 9 || { err "Script läuft bereits (Lock: $LOCK_FILE)."; exit 1; }
 
 log "======== VPS-Update gestartet ========" "$GREEN"
 log "Hostname: $(hostname) | Kernel: $(uname -r) | Uptime: $(uptime -p)" "$BLUE"
@@ -169,7 +169,7 @@ start_coolify_stack() {
   # Verifikation
   sleep 5
   for s in coolify-db coolify-redis coolify-realtime coolify coolify-proxy; do
-    if docker ps | grep -q "$s"; then
+    if docker ps --format '{{.Names}}' | grep -qx "$s"; then
       log "✓ $s läuft" "$GREEN"
     else
       log "⚠ $s läuft nicht" "$YELLOW"

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # vps-update-auto.sh
 # Intelligentes VPS Update-Skript das automatisch Coolify oder Dokploy erkennt
 # Version 1.0
@@ -38,7 +38,7 @@ detect_deployment_system() {
     log "INFO" "Erkenne Deployment-System..."
     
     # Prüfe auf Coolify
-    if docker ps -a 2>/dev/null | grep -q "coolify"; then
+    if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "coolify"; then
         DEPLOYMENT_SYSTEM="coolify"
         
         # Finde Coolify-Pfad
@@ -61,7 +61,7 @@ detect_deployment_system() {
     fi
     
     # Prüfe auf Dokploy
-    if docker ps -a 2>/dev/null | grep -q "dokploy"; then
+    if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "dokploy"; then
         DEPLOYMENT_SYSTEM="dokploy"
         
         # Finde Dokploy-Pfad
@@ -98,13 +98,9 @@ check_prerequisites() {
         exit 1
     fi
 
-    # Lock-File Check
-    if [[ -f "$LOCKFILE" ]]; then
-        log "ERROR" "Update läuft bereits (Lockfile: $LOCKFILE)"
-        exit 1
-    fi
-    
-    touch "$LOCKFILE"
+    # Atomic lock
+    exec 9>"$LOCKFILE"
+    flock -n 9 || { log "ERROR" "Script läuft bereits (Lock: $LOCKFILE)"; exit 1; }
     
     # Erkenne Deployment-System
     detect_deployment_system
@@ -268,36 +264,36 @@ verify_coolify_services() {
     
     local all_ok=true
     
-    if docker ps | grep -q "coolify-db"; then
+    if docker ps --format '{{.Names}}' | grep -qx "coolify-db"; then
         log "SUCCESS" "✓ Coolify Database läuft"
     else
         log "WARNING" "✗ Coolify Database läuft nicht!"
         all_ok=false
     fi
-    
-    if docker ps | grep -q "coolify-redis"; then
+
+    if docker ps --format '{{.Names}}' | grep -qx "coolify-redis"; then
         log "SUCCESS" "✓ Coolify Redis läuft"
     else
         log "WARNING" "✗ Coolify Redis läuft nicht!"
         all_ok=false
     fi
-    
-    if docker ps | grep -q "coolify-realtime"; then
+
+    if docker ps --format '{{.Names}}' | grep -qx "coolify-realtime"; then
         log "SUCCESS" "✓ Coolify Soketi (Realtime) läuft"
     else
         log "WARNING" "✗ Coolify Soketi läuft nicht!"
         all_ok=false
     fi
-    
+
     # Prüfe Hauptcontainer (nicht coolify-db, coolify-redis, etc.)
-    if docker ps | grep "^coolify" | grep -qv "coolify-"; then
+    if docker ps --format '{{.Names}}' | grep -qx "coolify"; then
         log "SUCCESS" "✓ Coolify Hauptservice läuft"
     else
         log "ERROR" "✗ Coolify Hauptservice läuft nicht!"
         all_ok=false
     fi
-    
-    if docker ps | grep -q "coolify-proxy"; then
+
+    if docker ps --format '{{.Names}}' | grep -qx "coolify-proxy"; then
         log "SUCCESS" "✓ Coolify Proxy läuft"
     else
         log "WARNING" "✗ Coolify Proxy läuft nicht!"
@@ -347,28 +343,28 @@ verify_dokploy_services() {
     
     local all_ok=true
     
-    if docker ps | grep -q "dokploy-postgres"; then
+    if docker ps --format '{{.Names}}' | grep -qx "dokploy-postgres"; then
         log "SUCCESS" "✓ Dokploy PostgreSQL läuft"
     else
         log "WARNING" "✗ Dokploy PostgreSQL läuft nicht!"
         all_ok=false
     fi
-    
-    if docker ps | grep -q "dokploy-redis"; then
+
+    if docker ps --format '{{.Names}}' | grep -qx "dokploy-redis"; then
         log "SUCCESS" "✓ Dokploy Redis läuft"
     else
         log "WARNING" "✗ Dokploy Redis läuft nicht!"
         all_ok=false
     fi
-    
-    if docker ps | grep -q "dokploy/dokploy"; then
+
+    if docker ps --format '{{.Names}}' | grep -qx "dokploy"; then
         log "SUCCESS" "✓ Dokploy Hauptservice läuft"
     else
         log "ERROR" "✗ Dokploy Hauptservice läuft nicht!"
         all_ok=false
     fi
-    
-    if docker ps | grep -q "dokploy-traefik"; then
+
+    if docker ps --format '{{.Names}}' | grep -qx "dokploy-traefik"; then
         log "SUCCESS" "✓ Traefik Proxy läuft"
     else
         log "WARNING" "✗ Traefik Proxy läuft nicht!"
@@ -408,9 +404,9 @@ check_reboot_required() {
     if [[ -f /var/run/reboot-required ]]; then
         log "WARNING" "=== NEUSTART ERFORDERLICH ==="
         log "WARNING" "Gründe:"
-        cat /var/run/reboot-required.pkgs 2>/dev/null | while read -r pkg; do
+        while read -r pkg; do
             log "WARNING" "  - $pkg"
-        done
+        done < <(cat /var/run/reboot-required.pkgs 2>/dev/null)
         
         log "INFO" "Starte Neustart in 30 Sekunden..."
         log "INFO" "Drücken Sie Ctrl+C zum Abbrechen"

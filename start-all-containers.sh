@@ -141,13 +141,13 @@ log "\n======== Container Status ========" "$GREEN"
 printf "%-40s %-15s %-15s\n" "CONTAINER" "STATUS" "HEALTH"
 printf "%-40s %-15s %-15s\n" "$(printf '%0.s-' {1..40})" "$(printf '%0.s-' {1..15})" "$(printf '%0.s-' {1..15})"
 
-docker ps -a --format '{{.Names}}' | while read -r name; do
+while read -r name; do
     if [[ -n "$name" ]]; then
         STATUS=$(docker inspect --format '{{.State.Status}}' "$name" 2>/dev/null || echo "unknown")
         HEALTH=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}no-check{{end}}' "$name" 2>/dev/null || echo "unknown")
         printf "%-40s %-15s %-15s\n" "$name" "$STATUS" "$HEALTH"
     fi
-done
+done < <(docker ps -a --format '{{.Names}}')
 
 log "\nContainer-Start abgeschlossen!" "$GREEN"
 log "Prüfe die Logs mit: docker logs <container-name>" "$YELLOW"

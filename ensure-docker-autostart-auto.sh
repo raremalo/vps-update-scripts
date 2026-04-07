@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # ensure-docker-autostart-auto.sh
 # Intelligentes Docker-Autostart-Skript für Coolify und Dokploy
 # Startet Container nach Reboot in korrekter Reihenfolge
@@ -26,7 +26,7 @@ detect_deployment_system() {
     log "Erkenne Deployment-System..."
     
     # Prüfe auf Coolify
-    if docker ps -a 2>/dev/null | grep -q "coolify"; then
+    if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "coolify"; then
         DEPLOYMENT_SYSTEM="coolify"
         
         # Finde Coolify-Pfad
@@ -43,7 +43,7 @@ detect_deployment_system() {
     fi
     
     # Prüfe auf Dokploy
-    if docker ps -a 2>/dev/null | grep -q "dokploy"; then
+    if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "dokploy"; then
         DEPLOYMENT_SYSTEM="dokploy"
         
         # Finde Dokploy-Pfad
@@ -209,17 +209,17 @@ start_other_containers() {
         *) system_prefix="nonexistent" ;;
     esac
     
-    docker ps -a --format '{{.Names}}' | grep -v "^${system_prefix}" | while read -r container; do
+    while read -r container; do
         if [[ -n "$container" ]]; then
             local state=$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null || echo "false")
             local restart_policy=$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$container" 2>/dev/null || echo "")
-            
+
             if [[ "$state" == "false" ]] && ([[ "$restart_policy" == "always" ]] || [[ "$restart_policy" == "unless-stopped" ]]); then
                 log "Starte Container: $container"
                 docker start "$container" 2>/dev/null || log "⚠ Fehler beim Starten von $container"
             fi
         fi
-    done
+    done < <(docker ps -a --format '{{.Names}}' | grep -v "^${system_prefix}")
 }
 
 # =====================================

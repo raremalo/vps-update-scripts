@@ -338,5 +338,3 @@ cleanup_old_backups() {
     fi
 }
 
-# Export der Hauptfunktion
-export -f perform_backup

@@ -86,7 +86,7 @@ show_status() {
     CONTAINER_TYPES["proxy"]=0
     CONTAINER_TYPES["application"]=0
     
-    docker ps -a --format '{{.Names}}' | while read -r name; do
+    while read -r name; do
         if [[ -n "$name" ]]; then
             STATUS=$(docker inspect --format '{{.State.Status}}' "$name" 2>/dev/null || echo "unknown")
             RESTART_POLICY=$(docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$name" 2>/dev/null || echo "unknown")
@@ -107,8 +107,8 @@ show_status() {
             
             printf "%-40s ${STATUS_COLOR}%-15s${NC} ${POLICY_COLOR}%-20s${NC} %-15s\n" "$name" "$STATUS" "$RESTART_POLICY" "$HEALTH"
         fi
-    done
-    
+    done < <(docker ps -a --format '{{.Names}}')
+
     # Zusammenfassung
     TOTAL=$(docker ps -a --format '{{.Names}}' | wc -l)
     RUNNING=$(docker ps --format '{{.Names}}' | wc -l)

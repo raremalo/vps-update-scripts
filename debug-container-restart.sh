@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Debug Script für Container Restart Policy Problem
 
-set -eo pipefail
+set -euo pipefail
 
 # Farben
 RED='\033[0;31m'

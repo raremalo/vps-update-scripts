@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # vps-update-coolify.sh
 # VPS Update-Skript optimiert für Coolify
 # Version 1.0
@@ -40,13 +40,9 @@ check_prerequisites() {
         exit 1
     fi
 
-    # Lock-File Check
-    if [[ -f "$LOCKFILE" ]]; then
-        log "ERROR" "Update läuft bereits (Lockfile: $LOCKFILE)"
-        exit 1
-    fi
-    
-    touch "$LOCKFILE"
+    # Atomic lock
+    exec 9>"$LOCKFILE"
+    flock -n 9 || { log "ERROR" "Script läuft bereits (Lock: $LOCKFILE)"; exit 1; }
     
     # Finde Coolify-Installationspfad
     detect_coolify_path
@@ -71,7 +67,7 @@ detect_coolify_path() {
     done
     
     # Falls nicht gefunden, prüfe ob Coolify-Container laufen
-    if docker ps | grep -q "coolify"; then
+    if docker ps --format '{{.Names}}' | grep -q "coolify"; then
         log "WARNING" "Coolify-Container laufen, aber docker-compose.yml nicht gefunden"
         log "INFO" "Verwende Docker-Befehle statt docker-compose"
         COOLIFY_PATH=""
@@ -85,7 +81,7 @@ detect_coolify_path() {
 stop_docker_containers() {
     log "INFO" "Stoppe Docker-Container..."
     
-    if docker ps | grep -q coolify; then
+    if docker ps --format '{{.Names}}' | grep -q "coolify"; then
         log "INFO" "Coolify erkannt - stoppe in korrekter Reihenfolge..."
         
         # 1. Stoppe zuerst Proxy
@@ -149,7 +145,7 @@ update_system() {
 }
 
 start_coolify_stack() {
-    if ! docker ps -a | grep -q coolify; then
+    if ! docker ps -a --format '{{.Names}}' | grep -q "coolify"; then
         log "ERROR" "Coolify nicht installiert"
         exit 1
     fi
@@ -208,31 +204,31 @@ start_coolify_stack() {
     # Verifiziere dass Services laufen
     log "INFO" "Verifiziere Coolify-Services..."
     
-    if docker ps | grep -q "coolify-db"; then
+    if docker ps --format '{{.Names}}' | grep -qx "coolify-db"; then
         log "SUCCESS" "✓ Coolify Database läuft"
     else
         log "WARNING" "✗ Coolify Database läuft nicht!"
     fi
     
-    if docker ps | grep -q "coolify-redis"; then
+    if docker ps --format '{{.Names}}' | grep -qx "coolify-redis"; then
         log "SUCCESS" "✓ Coolify Redis läuft"
     else
         log "WARNING" "✗ Coolify Redis läuft nicht!"
     fi
     
-    if docker ps | grep -q "coolify-realtime"; then
+    if docker ps --format '{{.Names}}' | grep -qx "coolify-realtime"; then
         log "SUCCESS" "✓ Coolify Soketi (Realtime) läuft"
     else
         log "ERROR" "✗ Coolify Soketi läuft nicht! KRITISCH!"
     fi
     
-    if docker ps | grep "^coolify" | grep -qv "coolify-"; then
+    if docker ps --format '{{.Names}}' | grep -qx "coolify"; then
         log "SUCCESS" "✓ Coolify Hauptservice läuft"
     else
         log "ERROR" "✗ Coolify Hauptservice läuft nicht!"
     fi
     
-    if docker ps | grep -q "coolify-proxy"; then
+    if docker ps --format '{{.Names}}' | grep -qx "coolify-proxy"; then
         log "SUCCESS" "✓ Coolify Proxy läuft"
     else
         log "WARNING" "✗ Coolify Proxy läuft nicht!"
@@ -265,9 +261,9 @@ check_reboot_required() {
     if [[ -f /var/run/reboot-required ]]; then
         log "WARNING" "=== NEUSTART ERFORDERLICH ==="
         log "WARNING" "Gründe:"
-        cat /var/run/reboot-required.pkgs 2>/dev/null | while read -r pkg; do
+        while read -r pkg; do
             log "WARNING" "  - $pkg"
-        done
+        done < <(cat /var/run/reboot-required.pkgs 2>/dev/null)
         
         log "INFO" "Starte Neustart in 30 Sekunden..."
         log "INFO" "Drücken Sie Ctrl+C zum Abbrechen"

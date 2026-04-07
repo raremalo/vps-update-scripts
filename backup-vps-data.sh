@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # backup-vps-data.sh
 # Standalone Backup-Skript für VPS-Daten
 # Features: Datenbank-Backups, Volume-Sicherung, Konfigurations-Export, Remote-Backup-Support
@@ -188,12 +188,12 @@ backup_docker_configs() {
     
     # Docker-Compose Files finden und sichern
     mkdir -p "$docker_dir/compose-files"
-    find / -name "docker-compose*.yml" -o -name "docker-compose*.yaml" 2>/dev/null | while read -r compose_file; do
+    while read -r compose_file; do
         if [[ -f "$compose_file" ]]; then
             local backup_name=$(echo "$compose_file" | tr '/' '_')
             cp "$compose_file" "$docker_dir/compose-files/${backup_name}"
         fi
-    done
+    done < <(find / -xdev -maxdepth 5 -name "docker-compose*.yml" -o -name "docker-compose*.yaml" 2>/dev/null)
     
     # Docker Networks
     docker network ls --format json > "$docker_dir/networks.json"
@@ -235,7 +235,7 @@ backup_databases() {
         local root_pass=$(docker exec "$container" printenv MYSQL_ROOT_PASSWORD 2>/dev/null || echo "")
         
         if [[ -n "$root_pass" ]]; then
-            docker exec "$container" mysqldump -uroot -p"$root_pass" --all-databases --single-transaction 2>/dev/null | \
+            docker exec -e MYSQL_PWD="$root_pass" "$container" mysqldump -uroot --all-databases --single-transaction 2>/dev/null | \
                 gzip > "$db_dir/${container}_mysql.sql.gz" && \
                 log "SUCCESS" "MySQL $container gesichert"
         else
@@ -267,7 +267,7 @@ backup_databases() {
     done
     
     # Coolify-spezifische DB
-    if docker ps | grep -q "coolify-db"; then
+    if docker ps --format '{{.Names}}' | grep -qx "coolify-db"; then
         log "INFO" "Sichere Coolify-Datenbank..."
         docker exec coolify-db pg_dumpall -U postgres 2>/dev/null | \
             gzip > "$db_dir/coolify_database.sql.gz" && \
@@ -385,16 +385,16 @@ backup_configs() {
         mkdir -p "$conf_dir/coolify"
         
         # .env Dateien
-        find /data/coolify -name ".env*" -type f 2>/dev/null | while read -r env_file; do
+        while read -r env_file; do
             local backup_name=$(echo "$env_file" | tr '/' '_')
             cp "$env_file" "$conf_dir/coolify/${backup_name}"
-        done
-        
+        done < <(find /data/coolify -name ".env*" -type f 2>/dev/null)
+
         # docker-compose Dateien
-        find /data/coolify -name "docker-compose*.yml" -o -name "docker-compose*.yaml" 2>/dev/null | while read -r compose_file; do
+        while read -r compose_file; do
             local backup_name=$(echo "$compose_file" | tr '/' '_')
             cp "$compose_file" "$conf_dir/coolify/${backup_name}"
-        done
+        done < <(find /data/coolify -name "docker-compose*.yml" -o -name "docker-compose*.yaml" 2>/dev/null)
     fi
     
     log "SUCCESS" "Konfigurationsdateien gesichert"
@@ -585,4 +585,47 @@ main() {
     
     # Vorbereitung
     check_requirements
-    check_disk_space "$BACKUP_DIR" "$MIN_FREE_SPACE_
+    check_disk_space "$BACKUP_DIR" "$MIN_FREE_SPACE_GB"
+
+    # Erstelle temporäres Backup-Verzeichnis
+    mkdir -p "$BACKUP_TEMP"
+    mkdir -p "$BACKUP_DIR"
+
+    # Backup-Schritte
+    if [[ "$BACKUP_SYSTEM" == "true" ]]; then
+        backup_system_info
+    fi
+
+    if [[ "$BACKUP_DOCKER" == "true" ]]; then
+        backup_docker_configs
+    fi
+
+    if [[ "$BACKUP_DATABASES" == "true" ]]; then
+        backup_databases
+    fi
+
+    if [[ "$BACKUP_VOLUMES" == "true" ]]; then
+        backup_docker_volumes
+    fi
+
+    if [[ "$BACKUP_CONFIGS" == "true" ]]; then
+        backup_configs
+    fi
+
+    # Archiv erstellen (inkl. Kompression und Verschlüsselung)
+    local archive_file
+    archive_file=$(create_archive)
+
+    # Alte Backups aufräumen
+    cleanup_old_backups
+
+    # Remote-Backup
+    if [[ "$REMOTE_BACKUP" == "true" ]]; then
+        upload_to_remote "$archive_file"
+    fi
+
+    log "SUCCESS" "=== Backup abgeschlossen: $archive_file ==="
+    echo ""
+}
+
+main "$@"
