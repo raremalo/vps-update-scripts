@@ -53,12 +53,24 @@ detect_dokploy_path() {
 
 # Starte Dokploy in korrekter Reihenfolge
 start_dokploy() {
-    if ! docker ps -a --format '{{.Names}}' | grep -q "dokploy"; then
+    if ! docker ps -a --format '{{.Names}}' | grep -qi "dokploy"; then
         log "Dokploy nicht installiert, überspringe..."
         return 0
     fi
     
     log "Starte Dokploy-Services..."
+    
+    # Erkenne Container-Namen dynamisch
+    local c_postgres c_redis c_main c_traefik
+    local all_containers
+    all_containers=$(docker ps -a --format '{{.Names}}')
+    
+    c_postgres=$(echo "$all_containers" | grep -iE '(dokploy.*postgres|postgres.*dokploy)' | head -1) || true
+    c_redis=$(echo "$all_containers" | grep -iE '(dokploy.*redis|redis.*dokploy)' | head -1) || true
+    c_traefik=$(echo "$all_containers" | grep -iE '(dokploy.*traefik|traefik.*dokploy)' | head -1) || true
+    c_main=$(echo "$all_containers" | grep -i 'dokploy' | grep -viE '(postgres|redis|traefik)' | head -1) || true
+    
+    log "Erkannte Container: pg=$c_postgres redis=$c_redis main=$c_main traefik=$c_traefik"
     
     local dokploy_path=$(detect_dokploy_path)
     
@@ -75,18 +87,18 @@ start_dokploy() {
         
         # 1. Datenbank und Redis zuerst
         log "Starte Datenbank und Redis..."
-        docker start dokploy-postgres 2>/dev/null || true
-        docker start dokploy-redis 2>/dev/null || true
+        [[ -n "$c_postgres" ]] && docker start "$c_postgres" 2>/dev/null || true
+        [[ -n "$c_redis" ]] && docker start "$c_redis" 2>/dev/null || true
         sleep 10
         
         # 2. Hauptcontainer (KEIN Soketi bei Dokploy!)
         log "Starte Dokploy Hauptservice..."
-        docker start dokploy 2>/dev/null || true
+        [[ -n "$c_main" ]] && docker start "$c_main" 2>/dev/null || true
         sleep 10
         
         # 3. Traefik
         log "Starte Traefik Proxy..."
-        docker start dokploy-traefik 2>/dev/null || true
+        [[ -n "$c_traefik" ]] && docker start "$c_traefik" 2>/dev/null || true
         sleep 5
     fi
     
@@ -95,26 +107,26 @@ start_dokploy() {
     
     log "Verifiziere Dokploy-Services..."
     
-    if docker ps --format '{{.Names}}' | grep -qx "dokploy-postgres"; then
-        log "✓ Dokploy PostgreSQL läuft"
+    if [[ -n "$c_postgres" ]] && docker ps --format '{{.Names}}' | grep -qx "$c_postgres"; then
+        log "✓ PostgreSQL ($c_postgres) läuft"
     else
-        log "✗ WARNING: Dokploy PostgreSQL läuft nicht!"
+        log "✗ WARNING: PostgreSQL läuft nicht!"
     fi
 
-    if docker ps --format '{{.Names}}' | grep -qx "dokploy-redis"; then
-        log "✓ Dokploy Redis läuft"
+    if [[ -n "$c_redis" ]] && docker ps --format '{{.Names}}' | grep -qx "$c_redis"; then
+        log "✓ Redis ($c_redis) läuft"
     else
-        log "✗ WARNING: Dokploy Redis läuft nicht!"
+        log "✗ WARNING: Redis läuft nicht!"
     fi
 
-    if docker ps --format '{{.Names}}' | grep -qx "dokploy"; then
-        log "✓ Dokploy Hauptservice läuft"
+    if [[ -n "$c_main" ]] && docker ps --format '{{.Names}}' | grep -qx "$c_main"; then
+        log "✓ Dokploy ($c_main) läuft"
     else
         log "✗ WARNING: Dokploy Hauptservice läuft nicht!"
     fi
 
-    if docker ps --format '{{.Names}}' | grep -qx "dokploy-traefik"; then
-        log "✓ Traefik Proxy läuft"
+    if [[ -n "$c_traefik" ]] && docker ps --format '{{.Names}}' | grep -qx "$c_traefik"; then
+        log "✓ Traefik ($c_traefik) läuft"
     else
         log "✗ WARNING: Traefik Proxy läuft nicht!"
     fi
