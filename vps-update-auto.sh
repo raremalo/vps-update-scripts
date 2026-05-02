@@ -307,40 +307,23 @@ start_deployment_stack() {
 start_coolify_stack() {
     log "INFO" "Starte Coolify-Stack in korrekter Reihenfolge..."
     
-    if [[ -n "$DEPLOYMENT_PATH" ]] && [[ -f "$DEPLOYMENT_PATH/docker-compose.yml" ]]; then
-        cd "$DEPLOYMENT_PATH"
-        
-        # 1. Datenbank und Cache
-        log "INFO" "Starte Datenbank und Redis..."
-        $DOCKER_COMPOSE up -d coolify-db coolify-redis
-        sleep 10
-        
-        # 2. Soketi (Realtime) - KRITISCH!
-        log "INFO" "Starte Soketi (Realtime Service)..."
-        $DOCKER_COMPOSE up -d coolify-realtime
-        sleep 10
-        
-        # 3. Hauptcontainer
-        log "INFO" "Starte Coolify Hauptservice..."
-        $DOCKER_COMPOSE up -d coolify
-        sleep 10
-        
-        # 4. Proxy
-        log "INFO" "Starte Coolify Proxy..."
-        $DOCKER_COMPOSE up -d coolify-proxy
-        sleep 5
-    else
-        # Fallback: Manuelle Container-Starts
-        log "INFO" "Starte Container manuell (kein docker-compose.yml gefunden)..."
-        docker start coolify-db coolify-redis 2>/dev/null || true
-        sleep 10
-        docker start coolify-realtime 2>/dev/null || true
-        sleep 10
-        docker start coolify 2>/dev/null || true
-        sleep 10
-        docker start coolify-proxy 2>/dev/null || true
-        sleep 5
-    fi
+    # docker start bevorzugt — vermeidet compose-Validierungsfehler
+    # Container existieren bereits, müssen nur gestartet werden
+    log "INFO" "Starte Datenbank und Redis..."
+    docker start coolify-db coolify-redis 2>/dev/null || true
+    sleep 10
+    
+    log "INFO" "Starte Soketi (Realtime Service)..."
+    docker start coolify-realtime 2>/dev/null || true
+    sleep 10
+    
+    log "INFO" "Starte Coolify Hauptservice..."
+    docker start coolify 2>/dev/null || true
+    sleep 10
+    
+    log "INFO" "Starte Coolify Proxy..."
+    docker start coolify-proxy 2>/dev/null || true
+    sleep 5
     
     # Verifizierung
     verify_coolify_services
@@ -392,33 +375,18 @@ verify_coolify_services() {
 start_dokploy_stack() {
     log "INFO" "Starte Dokploy-Stack in korrekter Reihenfolge..."
     
-    if [[ -n "$DEPLOYMENT_PATH" ]] && [[ -f "$DEPLOYMENT_PATH/docker-compose.yml" ]]; then
-        cd "$DEPLOYMENT_PATH"
-        
-        # 1. Datenbank und Redis
-        log "INFO" "Starte PostgreSQL und Redis..."
-        $DOCKER_COMPOSE up -d dokploy-postgres dokploy-redis
-        sleep 10
-        
-        # 2. Hauptcontainer (KEIN Soketi bei Dokploy)
-        log "INFO" "Starte Dokploy Hauptservice..."
-        $DOCKER_COMPOSE up -d dokploy
-        sleep 10
-        
-        # 3. Traefik
-        log "INFO" "Starte Traefik Proxy..."
-        $DOCKER_COMPOSE up -d dokploy-traefik
-        sleep 5
-    else
-        # Fallback: Manuelle Container-Starts
-        log "INFO" "Starte Container manuell (kein docker-compose.yml gefunden)..."
-        docker start dokploy-postgres dokploy-redis 2>/dev/null || true
-        sleep 10
-        docker start dokploy 2>/dev/null || true
-        sleep 10
-        docker start dokploy-traefik 2>/dev/null || true
-        sleep 5
-    fi
+    # docker start bevorzugt — vermeidet compose-Validierungsfehler
+    log "INFO" "Starte PostgreSQL und Redis..."
+    docker start dokploy-postgres dokploy-redis 2>/dev/null || true
+    sleep 10
+    
+    log "INFO" "Starte Dokploy Hauptservice..."
+    docker start dokploy 2>/dev/null || true
+    sleep 10
+    
+    log "INFO" "Starte Traefik Proxy..."
+    docker start dokploy-traefik 2>/dev/null || true
+    sleep 5
     
     # Verifizierung
     verify_dokploy_services
