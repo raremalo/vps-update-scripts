@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # vps-update-dokploy.sh
 # VPS Update-Skript optimiert für Dokploy
-# Angepasst von vps-update-coolify-optimized.sh
+# Unterstützt Docker Swarm und reguläre Docker-Installationen
 
 set -euo pipefail
 
@@ -15,11 +15,18 @@ LOCKFILE="/var/run/vps-update.lock"
 # Dokploy-spezifische Konfiguration
 DOKPLOY_PATH="/etc/dokploy"  # Standardpfad, wird automatisch erkannt
 
-# Dynamisch erkannte Container-Namen (werden in detect_dokploy_containers gesetzt)
-DOKPLOY_CONTAINER_POSTGRES=""
-DOKPLOY_CONTAINER_REDIS=""
-DOKPLOY_CONTAINER_MAIN=""
-DOKPLOY_CONTAINER_TRAEFIK=""
+# Swarm-Erkennung
+IS_SWARM=false
+DOKPLOY_STACK=""
+
+# Docker Swarm Service-Namen
+SERVICE_POSTGRES=""
+SERVICE_REDIS=""
+SERVICE_MAIN=""
+SERVICE_TRAEFIK=""
+
+# Original-Replikas (für Restore nach Update)
+declare -A SERVICE_REPLICAS
 
 # =====================================
 # Hilfsfunktionen
@@ -53,14 +60,16 @@ check_prerequisites() {
     # Finde Dokploy-Installationspfad
     detect_dokploy_path
     
-    # Erkenne tatsächliche Container-Namen
-    detect_dokploy_containers
+    # Prüfe ob Docker Swarm aktiv ist
+    detect_swarm_mode
+    
+    # Erkenne Services/Container
+    detect_dokploy_services
 }
 
 detect_dokploy_path() {
     log "INFO" "Suche Dokploy-Installation..."
     
-    # Mögliche Installationspfade
     local possible_paths=(
         "/etc/dokploy"
         "/opt/dokploy"
@@ -78,8 +87,7 @@ detect_dokploy_path() {
     
     # Falls nicht gefunden, prüfe ob Dokploy-Container laufen
     if docker ps -a --format '{{.Names}}' | grep -qi "dokploy"; then
-        log "WARNING" "Dokploy-Container gefunden, aber docker-compose.yml nicht gefunden"
-        log "INFO" "Verwende Docker-Befehle statt docker-compose"
+        log "INFO" "Dokploy-Container gefunden, docker-compose.yml nicht lokalisiert"
         DOKPLOY_PATH=""
         return 0
     fi
@@ -88,90 +96,145 @@ detect_dokploy_path() {
     DOKPLOY_PATH=""
 }
 
-# Erkenne tatsächliche Dokploy-Container-Namen dynamisch
-detect_dokploy_containers() {
-    log "INFO" "Erkenne Dokploy-Container-Namen..."
+# Prüfe ob Docker Swarm aktiv ist
+detect_swarm_mode() {
+    local swarm_state
+    swarm_state=$(docker info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null || echo "inactive")
     
-    local all_containers
-    all_containers=$(docker ps -a --format '{{.Names}}')
+    if [[ "$swarm_state" == "active" ]]; then
+        IS_SWARM=true
+        log "INFO" "Docker Swarm erkannt"
+        
+        # Finde den Stack-Namen
+        local services
+        services=$(docker service ls --format '{{.Name}}' 2>/dev/null | grep -i "dokploy" || true)
+        if [[ -n "$services" ]]; then
+            # Stack-Name ist der Präfix vor dem ersten Unterstrich
+            DOKPLOY_STACK=$(echo "$services" | head -1 | cut -d'_' -f1)
+            log "INFO" "Dokploy Swarm-Stack: $DOKPLOY_STACK"
+        fi
+    else
+        IS_SWARM=false
+        log "INFO" "Docker Swarm nicht aktiv (regulärer Docker-Modus)"
+    fi
+}
+
+# Erkenne Dokploy-Services (Swarm) oder Container (regulär)
+detect_dokploy_services() {
+    log "INFO" "Erkenne Dokploy-Services..."
     
-    # Finde PostgreSQL-Container
-    DOKPLOY_CONTAINER_POSTGRES=$(echo "$all_containers" | grep -iE '(dokploy.*postgres|postgres.*dokploy)' | head -1) || true
-    
-    # Finde Redis-Container
-    DOKPLOY_CONTAINER_REDIS=$(echo "$all_containers" | grep -iE '(dokploy.*redis|redis.*dokploy)' | head -1) || true
-    
-    # Finde Traefik-Container
-    DOKPLOY_CONTAINER_TRAEFIK=$(echo "$all_containers" | grep -iE '(dokploy.*traefik|traefik.*dokploy)' | head -1) || true
-    
-    # Finde Haupt-Container (Dokploy selbst, aber nicht postgres/redis/traefik)
-    DOKPLOY_CONTAINER_MAIN=$(echo "$all_containers" | grep -i 'dokploy' | grep -viE '(postgres|redis|traefik)' | head -1) || true
-    
-    # Logge was gefunden wurde
-    log "INFO" "Erkannte Container:"
-    [[ -n "$DOKPLOY_CONTAINER_POSTGRES" ]] && log "INFO" "  PostgreSQL: $DOKPLOY_CONTAINER_POSTGRES" || log "WARNING" "  PostgreSQL: NICHT GEFUNDEN"
-    [[ -n "$DOKPLOY_CONTAINER_REDIS" ]] && log "INFO" "  Redis: $DOKPLOY_CONTAINER_REDIS" || log "WARNING" "  Redis: NICHT GEFUNDEN"
-    [[ -n "$DOKPLOY_CONTAINER_MAIN" ]] && log "INFO" "  Hauptservice: $DOKPLOY_CONTAINER_MAIN" || log "WARNING" "  Hauptservice: NICHT GEFUNDEN"
-    [[ -n "$DOKPLOY_CONTAINER_TRAEFIK" ]] && log "INFO" "  Traefik: $DOKPLOY_CONTAINER_TRAEFIK" || log "WARNING" "  Traefik: NICHT GEFUNDEN"
+    if [[ "$IS_SWARM" == "true" ]]; then
+        # Docker Swarm: Nutze 'docker service ls'
+        local all_services
+        all_services=$(docker service ls --format '{{.Name}}' 2>/dev/null | grep -i "dokploy" || true)
+        
+        if [[ -z "$all_services" ]]; then
+            log "WARNING" "Keine Dokploy-Swarm-Services gefunden"
+            return 0
+        fi
+        
+        log "INFO" "Gefundene Swarm-Services:"
+        echo "$all_services" | while read -r svc; do
+            log "INFO" "  - $svc"
+        done
+        
+        # Mappe Services zu Rollen
+        SERVICE_POSTGRES=$(echo "$all_services" | grep -iE 'postgres' | head -1) || true
+        SERVICE_REDIS=$(echo "$all_services" | grep -iE 'redis' | head -1) || true
+        SERVICE_TRAEFIK=$(echo "$all_services" | grep -iE 'traefik' | head -1) || true
+        # Hauptservice: alles mit dokploy aber ohne postgres/redis/traefik
+        SERVICE_MAIN=$(echo "$all_services" | grep -viE '(postgres|redis|traefik)' | head -1) || true
+        
+        log "INFO" "Zugeordnete Services:"
+        [[ -n "$SERVICE_POSTGRES" ]] && log "INFO" "  PostgreSQL: $SERVICE_POSTGRES" || log "WARNING" "  PostgreSQL: NICHT GEFUNDEN"
+        [[ -n "$SERVICE_REDIS" ]] && log "INFO" "  Redis: $SERVICE_REDIS" || log "WARNING" "  Redis: NICHT GEFUNDEN"
+        [[ -n "$SERVICE_MAIN" ]] && log "INFO" "  Hauptservice: $SERVICE_MAIN" || log "WARNING" "  Hauptservice: NICHT GEFUNDEN"
+        [[ -n "$SERVICE_TRAEFIK" ]] && log "INFO" "  Traefik: $SERVICE_TRAEFIK" || log "WARNING" "  Traefik: NICHT GEFUNDEN"
+        
+        # Speichere aktuelle Replika-Zahlen
+        for svc in $SERVICE_POSTGRES $SERVICE_REDIS $SERVICE_MAIN $SERVICE_TRAEFIK; do
+            [[ -z "$svc" ]] && continue
+            local replicas
+            replicas=$(docker service ls --format '{{.Name}} {{.Replicas}}' 2>/dev/null | grep "^${svc} " | awk '{print $2}' | cut -d'/' -f2 || echo "1")
+            SERVICE_REPLICAS["$svc"]="${replicas:-1}"
+            log "INFO" "  $svc: $replicas Replika(s)"
+        done
+        
+    else
+        # Regulärer Docker: Nutze Container-Namen (Pattern-Matching)
+        local all_containers
+        all_containers=$(docker ps -a --format '{{.Names}}')
+        
+        SERVICE_POSTGRES=$(echo "$all_containers" | grep -iE '(dokploy.*postgres|postgres.*dokploy)' | head -1) || true
+        SERVICE_REDIS=$(echo "$all_containers" | grep -iE '(dokploy.*redis|redis.*dokploy)' | head -1) || true
+        SERVICE_TRAEFIK=$(echo "$all_containers" | grep -iE '(dokploy.*traefik|traefik.*dokploy)' | head -1) || true
+        SERVICE_MAIN=$(echo "$all_containers" | grep -i 'dokploy' | grep -viE '(postgres|redis|traefik)' | head -1) || true
+        
+        log "INFO" "Erkannte Container:"
+        [[ -n "$SERVICE_POSTGRES" ]] && log "INFO" "  PostgreSQL: $SERVICE_POSTGRES" || log "WARNING" "  PostgreSQL: NICHT GEFUNDEN"
+        [[ -n "$SERVICE_REDIS" ]] && log "INFO" "  Redis: $SERVICE_REDIS" || log "WARNING" "  Redis: NICHT GEFUNDEN"
+        [[ -n "$SERVICE_MAIN" ]] && log "INFO" "  Hauptservice: $SERVICE_MAIN" || log "WARNING" "  Hauptservice: NICHT GEFUNDEN"
+        [[ -n "$SERVICE_TRAEFIK" ]] && log "INFO" "  Traefik: $SERVICE_TRAEFIK" || log "WARNING" "  Traefik: NICHT GEFUNDEN"
+    fi
 }
 
 stop_docker_containers() {
-    log "INFO" "Stoppe Docker-Container..."
+    log "INFO" "Stoppe Dokploy-Services..."
     
-    # Dokploy-spezifische Reihenfolge (OHNE Soketi, da nicht vorhanden)
-    if [[ -n "$DOKPLOY_CONTAINER_MAIN" ]] || [[ -n "$DOKPLOY_CONTAINER_POSTGRES" ]]; then
-        log "INFO" "Dokploy erkannt - stoppe in korrekter Reihenfolge..."
+    if [[ "$IS_SWARM" == "true" ]]; then
+        # Docker Swarm: Scale Services auf 0
+        # Reihenfolge: Traefik → Hauptservice → Redis → PostgreSQL
         
-        # 1. Stoppe zuerst Traefik (Proxy)
-        [[ -n "$DOKPLOY_CONTAINER_TRAEFIK" ]] && docker stop "$DOKPLOY_CONTAINER_TRAEFIK" 2>/dev/null || true
+        [[ -n "$SERVICE_TRAEFIK" ]] && { log "INFO" "Stoppe $SERVICE_TRAEFIK..."; docker service scale "$SERVICE_TRAEFIK=0" 2>/dev/null || true; }
         sleep 2
-        
-        # 2. Dann Hauptcontainer
-        [[ -n "$DOKPLOY_CONTAINER_MAIN" ]] && docker stop "$DOKPLOY_CONTAINER_MAIN" 2>/dev/null || true
+        [[ -n "$SERVICE_MAIN" ]] && { log "INFO" "Stoppe $SERVICE_MAIN..."; docker service scale "$SERVICE_MAIN=0" 2>/dev/null || true; }
         sleep 2
-        
-        # 3. Zuletzt Datenbank und Redis
-        [[ -n "$DOKPLOY_CONTAINER_REDIS" ]] && docker stop "$DOKPLOY_CONTAINER_REDIS" 2>/dev/null || true
-        [[ -n "$DOKPLOY_CONTAINER_POSTGRES" ]] && docker stop "$DOKPLOY_CONTAINER_POSTGRES" 2>/dev/null || true
+        [[ -n "$SERVICE_REDIS" ]] && { log "INFO" "Stoppe $SERVICE_REDIS..."; docker service scale "$SERVICE_REDIS=0" 2>/dev/null || true; }
+        [[ -n "$SERVICE_POSTGRES" ]] && { log "INFO" "Stoppe $SERVICE_POSTGRES..."; docker service scale "$SERVICE_POSTGRES=0" 2>/dev/null || true; }
+        sleep 3
+    else
+        # Regulärer Docker: docker stop
+        [[ -n "$SERVICE_TRAEFIK" ]] && docker stop "$SERVICE_TRAEFIK" 2>/dev/null || true
+        sleep 2
+        [[ -n "$SERVICE_MAIN" ]] && docker stop "$SERVICE_MAIN" 2>/dev/null || true
+        sleep 2
+        [[ -n "$SERVICE_REDIS" ]] && docker stop "$SERVICE_REDIS" 2>/dev/null || true
+        [[ -n "$SERVICE_POSTGRES" ]] && docker stop "$SERVICE_POSTGRES" 2>/dev/null || true
         sleep 2
     fi
     
-    # Stoppe alle anderen Container
-    local containers=$(docker ps -q)
+    # Stoppe alle übrigen Container
+    local containers
+    containers=$(docker ps -q 2>/dev/null || true)
     if [[ -n "$containers" ]]; then
         log "INFO" "Stoppe verbleibende Container..."
         docker stop $containers 2>/dev/null || true
     fi
     
-    log "SUCCESS" "Alle Container gestoppt"
+    log "SUCCESS" "Alle Services gestoppt"
 }
 
 update_system() {
     log "INFO" "Starte System-Updates..."
     
-    # Update Paketlisten
     apt-get update || {
         log "ERROR" "apt-get update fehlgeschlagen"
         return 1
     }
     
-    # Halte problematische Pakete zurück (falls vorhanden)
     log "INFO" "Halte problematische Pakete zurück..."
     apt-mark hold snapd ubuntu-advantage-tools 2>/dev/null || true
     
-    # Führe Updates durch
     DEBIAN_FRONTEND=noninteractive apt-get upgrade -y || {
         log "ERROR" "apt-get upgrade fehlgeschlagen"
         return 1
     }
     
-    # Kernel-Updates
     DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y || {
         log "ERROR" "apt-get dist-upgrade fehlgeschlagen"
         return 1
     }
     
-    # Aufräumen
     apt-get autoremove -y
     apt-get autoclean
     
@@ -179,139 +242,182 @@ update_system() {
 }
 
 start_dokploy_stack() {
-    if ! docker ps -a --format '{{.Names}}' | grep -q "dokploy"; then
+    local has_dokploy=false
+    if [[ "$IS_SWARM" == "true" ]]; then
+        docker service ls --format '{{.Name}}' 2>/dev/null | grep -qi "dokploy" && has_dokploy=true
+    else
+        docker ps -a --format '{{.Names}}' | grep -qi "dokploy" && has_dokploy=true
+    fi
+    
+    if [[ "$has_dokploy" == "false" ]]; then
         log "INFO" "Dokploy nicht installiert"
         return 0
     fi
     
     log "INFO" "Starte Dokploy-Stack in korrekter Reihenfolge..."
     
-    # Wenn docker-compose.yml vorhanden, nutze es
-    if [[ -n "$DOKPLOY_PATH" ]] && [[ -f "$DOKPLOY_PATH/docker-compose.yml" ]]; then
-        cd "$DOKPLOY_PATH"
-        
-        # Ermittle docker-compose Service-Namen aus der yml
-        local compose_services
-        compose_services=$(docker compose config --services 2>/dev/null || docker-compose config --services 2>/dev/null || echo "")
-        
-        # Finde Service-Namen für jede Komponente
-        local pg_service="" redis_service="" main_service="" traefik_service=""
-        if [[ -n "$compose_services" ]]; then
-            pg_service=$(echo "$compose_services" | grep -iE '(postgres|database|db)' | head -1) || true
-            redis_service=$(echo "$compose_services" | grep -iE '(redis|cache)' | head -1) || true
-            traefik_service=$(echo "$compose_services" | grep -iE '(traefik|proxy)' | head -1) || true
-            main_service=$(echo "$compose_services" | grep -iE '(dokploy|app|server|api)' | grep -viE '(postgres|database|db|redis|cache|traefik|proxy)' | head -1) || true
-        fi
-        
-        # 1. Datenbank und Cache zuerst
-        log "INFO" "Starte Datenbank und Redis..."
-        if [[ -n "$pg_service" ]]; then
-            docker compose up -d "$pg_service" 2>/dev/null || docker-compose up -d "$pg_service" || true
-        fi
-        if [[ -n "$redis_service" ]]; then
-            docker compose up -d "$redis_service" 2>/dev/null || docker-compose up -d "$redis_service" || true
-        fi
-        # Fallback: falls keine Service-Namen erkannt wurden
-        if [[ -z "$pg_service" ]] && [[ -z "$redis_service" ]]; then
-            log "INFO" "Konnte docker-compose Services nicht ermitteln, starte alle..."
-            docker compose up -d 2>/dev/null || docker-compose up -d || true
-        fi
-        sleep 10
-        
-        # 2. Hauptcontainer (KEIN Soketi bei Dokploy!)
-        if [[ -n "$main_service" ]]; then
-            log "INFO" "Starte Dokploy Hauptservice..."
-            docker compose up -d "$main_service" 2>/dev/null || docker-compose up -d "$main_service" || true
-            sleep 10
-        fi
-        
-        # 3. Proxy (Traefik)
-        if [[ -n "$traefik_service" ]]; then
-            log "INFO" "Starte Traefik Proxy..."
-            docker compose up -d "$traefik_service" 2>/dev/null || docker-compose up -d "$traefik_service" || true
-            sleep 5
-        fi
-        
-        # Falls Hauptservice oder Traefik nicht erkannt wurden, starte den Rest
-        if [[ -z "$main_service" ]] || [[ -z "$traefik_service" ]]; then
-            log "INFO" "Starte verbleibende Services..."
-            docker compose up -d 2>/dev/null || docker-compose up -d || true
-            sleep 5
-        fi
-        
+    if [[ "$IS_SWARM" == "true" ]]; then
+        start_swarm_services
     else
-        # Fallback: Starte Container direkt mit Docker (verwende dynamisch erkannte Namen)
-        log "INFO" "Starte Container direkt (ohne docker-compose)..."
-        
-        # 1. Datenbank und Redis
-        [[ -n "$DOKPLOY_CONTAINER_POSTGRES" ]] && docker start "$DOKPLOY_CONTAINER_POSTGRES" 2>/dev/null || true
-        [[ -n "$DOKPLOY_CONTAINER_REDIS" ]] && docker start "$DOKPLOY_CONTAINER_REDIS" 2>/dev/null || true
+        start_regular_services
+    fi
+    
+    # Warte und verifiziere
+    sleep 5
+    verify_dokploy_services
+    
+    log "SUCCESS" "Dokploy-Stack gestartet"
+}
+
+# Starte Swarm-Services in korrekter Reihenfolge
+start_swarm_services() {
+    # Reihenfolge: PostgreSQL → Redis → Hauptservice → Traefik
+    
+    # 1. PostgreSQL
+    if [[ -n "$SERVICE_POSTGRES" ]]; then
+        local replicas="${SERVICE_REPLICAS[$SERVICE_POSTGRES]:-1}"
+        log "INFO" "Starte PostgreSQL ($SERVICE_POSTGRES, $replicas Replika(s))..."
+        docker service scale "$SERVICE_POSTGRES=$replicas" 2>/dev/null || true
         sleep 10
-        
-        # 2. Hauptcontainer
-        [[ -n "$DOKPLOY_CONTAINER_MAIN" ]] && docker start "$DOKPLOY_CONTAINER_MAIN" 2>/dev/null || true
-        sleep 10
-        
-        # 3. Traefik
-        [[ -n "$DOKPLOY_CONTAINER_TRAEFIK" ]] && docker start "$DOKPLOY_CONTAINER_TRAEFIK" 2>/dev/null || true
+    fi
+    
+    # 2. Redis
+    if [[ -n "$SERVICE_REDIS" ]]; then
+        local replicas="${SERVICE_REPLICAS[$SERVICE_REDIS]:-1}"
+        log "INFO" "Starte Redis ($SERVICE_REDIS, $replicas Replika(s))..."
+        docker service scale "$SERVICE_REDIS=$replicas" 2>/dev/null || true
         sleep 5
     fi
     
-    # Verifiziere dass Services laufen (nutze dynamisch erkannte Namen)
+    # 3. Hauptservice
+    if [[ -n "$SERVICE_MAIN" ]]; then
+        local replicas="${SERVICE_REPLICAS[$SERVICE_MAIN]:-1}"
+        log "INFO" "Starte Dokploy Hauptservice ($SERVICE_MAIN, $replicas Replika(s))..."
+        docker service scale "$SERVICE_MAIN=$replicas" 2>/dev/null || true
+        sleep 10
+    fi
+    
+    # 4. Traefik
+    if [[ -n "$SERVICE_TRAEFIK" ]]; then
+        local replicas="${SERVICE_REPLICAS[$SERVICE_TRAEFIK]:-1}"
+        log "INFO" "Starte Traefik ($SERVICE_TRAEFIK, $replicas Replika(s))..."
+        docker service scale "$SERVICE_TRAEFIK=$replicas" 2>/dev/null || true
+        sleep 5
+    fi
+}
+
+# Starte reguläre Docker-Container
+start_regular_services() {
+    if [[ -n "$DOKPLOY_PATH" ]] && [[ -f "$DOKPLOY_PATH/docker-compose.yml" ]]; then
+        cd "$DOKPLOY_PATH"
+        log "INFO" "Starte via docker-compose..."
+        docker compose up -d 2>/dev/null || docker-compose up -d || true
+    else
+        log "INFO" "Starte Container direkt..."
+        [[ -n "$SERVICE_POSTGRES" ]] && docker start "$SERVICE_POSTGRES" 2>/dev/null || true
+        [[ -n "$SERVICE_REDIS" ]] && docker start "$SERVICE_REDIS" 2>/dev/null || true
+        sleep 10
+        [[ -n "$SERVICE_MAIN" ]] && docker start "$SERVICE_MAIN" 2>/dev/null || true
+        sleep 10
+        [[ -n "$SERVICE_TRAEFIK" ]] && docker start "$SERVICE_TRAEFIK" 2>/dev/null || true
+        sleep 5
+    fi
+}
+
+# Verifiziere Services
+verify_dokploy_services() {
     log "INFO" "Verifiziere Dokploy-Services..."
     
-    if [[ -n "$DOKPLOY_CONTAINER_POSTGRES" ]]; then
-        if docker ps --format '{{.Names}}' | grep -qx "$DOKPLOY_CONTAINER_POSTGRES"; then
-            log "SUCCESS" "✓ PostgreSQL ($DOKPLOY_CONTAINER_POSTGRES) läuft"
-        else
-            log "WARNING" "✗ PostgreSQL ($DOKPLOY_CONTAINER_POSTGRES) läuft nicht!"
-        fi
+    if [[ "$IS_SWARM" == "true" ]]; then
+        # Swarm: Prüfe docker service ls Replicas-Spalte
+        verify_swarm_service "$SERVICE_POSTGRES" "PostgreSQL"
+        verify_swarm_service "$SERVICE_REDIS" "Redis"
+        verify_swarm_service "$SERVICE_MAIN" "Dokploy Hauptservice"
+        verify_swarm_service "$SERVICE_TRAEFIK" "Traefik Proxy"
+    else
+        # Regulär: Prüfe docker ps mit Pattern-Matching
+        verify_container "$SERVICE_POSTGRES" "PostgreSQL"
+        verify_container "$SERVICE_REDIS" "Redis"
+        verify_container "$SERVICE_MAIN" "Dokploy Hauptservice"
+        verify_container "$SERVICE_TRAEFIK" "Traefik Proxy"
     fi
-    
-    if [[ -n "$DOKPLOY_CONTAINER_REDIS" ]]; then
-        if docker ps --format '{{.Names}}' | grep -qx "$DOKPLOY_CONTAINER_REDIS"; then
-            log "SUCCESS" "✓ Redis ($DOKPLOY_CONTAINER_REDIS) läuft"
-        else
-            log "WARNING" "✗ Redis ($DOKPLOY_CONTAINER_REDIS) läuft nicht!"
-        fi
-    fi
+}
 
-    if [[ -n "$DOKPLOY_CONTAINER_MAIN" ]]; then
-        if docker ps --format '{{.Names}}' | grep -qx "$DOKPLOY_CONTAINER_MAIN"; then
-            log "SUCCESS" "✓ Dokploy ($DOKPLOY_CONTAINER_MAIN) läuft"
-        else
-            log "ERROR" "✗ Dokploy ($DOKPLOY_CONTAINER_MAIN) läuft nicht!"
-            # Diagnose: Zeige Logs des Containers
-            log "INFO" "Letzte Logs von $DOKPLOY_CONTAINER_MAIN:"
-            docker logs --tail 20 "$DOKPLOY_CONTAINER_MAIN" 2>&1 | tee -a "$LOGFILE" || true
-        fi
-    fi
-
-    if [[ -n "$DOKPLOY_CONTAINER_TRAEFIK" ]]; then
-        if docker ps --format '{{.Names}}' | grep -qx "$DOKPLOY_CONTAINER_TRAEFIK"; then
-            log "SUCCESS" "✓ Traefik ($DOKPLOY_CONTAINER_TRAEFIK) läuft"
-        else
-            log "WARNING" "✗ Traefik ($DOKPLOY_CONTAINER_TRAEFIK) läuft nicht!"
-        fi
-    fi
+# Verifiziere einen Swarm-Service
+verify_swarm_service() {
+    local service="$1"
+    local label="$2"
     
-    log "SUCCESS" "Dokploy-Stack gestartet"
+    [[ -z "$service" ]] && return 0
+    
+    local replicas_info
+    replicas_info=$(docker service ls --format '{{.Name}} {{.Replicas}}' 2>/dev/null | grep "^${service} " || true)
+    
+    if [[ -n "$replicas_info" ]]; then
+        local current desired
+        current=$(echo "$replicas_info" | awk '{print $2}' | cut -d'/' -f1)
+        desired=$(echo "$replicas_info" | awk '{print $2}' | cut -d'/' -f2)
+        
+        if [[ "$current" == "$desired" ]] && [[ "$current" -gt 0 ]]; then
+            log "SUCCESS" "✓ $label ($service) läuft ($current/$desired)"
+        else
+            log "WARNING" "✗ $label ($service) nicht vollständig ($current/$desired)"
+            # Diagnose
+            log "INFO" "Service-Details:"
+            docker service ps "$service" --format "table {{.Name}}\t{{.CurrentState}}\t{{.Error}}" 2>/dev/null | head -5 | tee -a "$LOGFILE" || true
+        fi
+    else
+        log "WARNING" "✗ $label ($service) nicht gefunden"
+    fi
+}
+
+# Verifiziere einen regulären Container
+verify_container() {
+    local container="$1"
+    local label="$2"
+    
+    [[ -z "$container" ]] && return 0
+    
+    if docker ps --format '{{.Names}}' | grep -q "$container"; then
+        log "SUCCESS" "✓ $label ($container) läuft"
+    else
+        log "WARNING" "✗ $label ($container) läuft nicht!"
+    fi
 }
 
 start_other_containers() {
     log "INFO" "Starte andere Container..."
     
-    # Finde alle gestoppten Container mit restart policy
-    docker ps -a --format '{{.Names}}\t{{.State}}' | grep -v "dokploy" | while IFS=$'\t' read -r name state; do
-        if [[ "$state" != "running" ]] && [[ -n "$name" ]]; then
-            local restart_policy=$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$name" 2>/dev/null || echo "")
+    if [[ "$IS_SWARM" == "true" ]]; then
+        # Im Swarm-Modus: Starte Nicht-Dokploy-Services die auf 0 skaliert wurden
+        local all_services
+        all_services=$(docker service ls --format '{{.Name}} {{.Replicas}}' 2>/dev/null | grep -vi "dokploy" || true)
+        
+        while IFS=' ' read -r name replicas; do
+            [[ -z "$name" ]] && continue
+            local current desired
+            current=$(echo "$replicas" | cut -d'/' -f1)
+            desired=$(echo "$replicas" | cut -d'/' -f2)
             
-            if [[ "$restart_policy" == "always" ]] || [[ "$restart_policy" == "unless-stopped" ]]; then
-                log "INFO" "Starte Container: $name"
-                docker start "$name" 2>/dev/null || log "WARNING" "Konnte $name nicht starten"
+            if [[ "$current" == "0" ]] && [[ "$desired" -gt 0 ]]; then
+                log "INFO" "Starte Service: $name"
+                docker service scale "$name=$desired" 2>/dev/null || log "WARNING" "Konnte $name nicht starten"
             fi
-        fi
-    done
+        done <<< "$all_services"
+    else
+        # Regulär: Starte gestoppte Container mit Restart-Policy
+        docker ps -a --format '{{.Names}}\t{{.State}}' | grep -vi "dokploy" | while IFS=$'\t' read -r name state; do
+            if [[ "$state" != "running" ]] && [[ -n "$name" ]]; then
+                local restart_policy
+                restart_policy=$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$name" 2>/dev/null || echo "")
+                
+                if [[ "$restart_policy" == "always" ]] || [[ "$restart_policy" == "unless-stopped" ]]; then
+                    log "INFO" "Starte Container: $name"
+                    docker start "$name" 2>/dev/null || log "WARNING" "Konnte $name nicht starten"
+                fi
+            fi
+        done
+    fi
     
     log "SUCCESS" "Andere Container gestartet"
 }
@@ -337,8 +443,13 @@ check_reboot_required() {
 }
 
 show_final_status() {
-    log "INFO" "=== Finale Container-Status ==="
-    docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" | grep -E "(dokploy|NAMES)" || true
+    log "INFO" "=== Finale Status ==="
+    
+    if [[ "$IS_SWARM" == "true" ]]; then
+        docker service ls --format "table {{.Name}}\t{{.Replicas}}\t{{.Image}}" 2>/dev/null | grep -E "(dokploy|NAME)" | tee -a "$LOGFILE" || true
+    else
+        docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" | grep -E "(dokploy|NAMES)" | tee -a "$LOGFILE" || true
+    fi
 }
 
 # =====================================
@@ -348,6 +459,7 @@ main() {
     log "INFO" "=== VPS Update für Dokploy gestartet ==="
     log "INFO" "Datum: $(date)"
     log "INFO" "Server: $(hostname)"
+    log "INFO" "Swarm-Modus: $IS_SWARM"
     
     # Voraussetzungen prüfen
     check_prerequisites
