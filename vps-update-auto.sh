@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # vps-update-auto.sh
 # Intelligentes VPS Update-Skript das automatisch Coolify oder Dokploy erkennt
-# Version 1.0
+# Version 2.0
 
 set -euo pipefail
 
@@ -12,9 +12,28 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOGFILE="/var/log/vps-update.log"
 LOCKFILE="/var/run/vps-update.lock"
 
+# Apt-Lock: Maximale Wartezeit in Sekunden (Standard: 5 Minuten)
+APT_LOCK_WAIT="${APT_LOCK_WAIT:-300}"
+APT_LOCK_INTERVAL=10
+
+# Log-Rotation: Maximale Loggröße in Bytes (Standard: 1MB)
+LOG_MAX_SIZE="${LOG_MAX_SIZE:-1048576}"
+
+# Reboot: Countdown in Sekunden (Standard: 60)
+REBOOT_DELAY="${REBOOT_DELAY:-60}"
+
 # Wird automatisch erkannt
 DEPLOYMENT_SYSTEM=""
 DEPLOYMENT_PATH=""
+
+# =====================================
+# Farben
+# =====================================
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
 
 # =====================================
 # Hilfsfunktionen
@@ -22,11 +41,37 @@ DEPLOYMENT_PATH=""
 log() {
     local level="$1"
     shift
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$level] $*" | tee -a "$LOGFILE"
+    local color=""
+    case "$level" in
+        INFO)    color="$BLUE" ;;
+        SUCCESS) color="$GREEN" ;;
+        WARNING) color="$YELLOW" ;;
+        ERROR)   color="$RED" ;;
+    esac
+    local msg="[$(date '+%Y-%m-%d %H:%M:%S')] [$level] $*"
+    echo -e "${color}${msg}${NC}" | tee -a "$LOGFILE"
+}
+
+rotate_log() {
+    if [[ -f "$LOGFILE" ]] && [[ $(stat -f%z "$LOGFILE" 2>/dev/null || stat -c%s "$LOGFILE" 2>/dev/null) -gt "$LOG_MAX_SIZE" ]]; then
+        local backup="${LOGFILE}.$(date '+%Y%m%d%H%M%S')"
+        mv "$LOGFILE" "$backup"
+        gzip "$backup" 2>/dev/null || true
+        # Nur die letzten 3 rotierten Logs behalten
+        ls -t "${LOGFILE}."*.gz 2>/dev/null | tail -n +4 | xargs rm -f 2>/dev/null || true
+        log "INFO" "Log rotiert"
+    fi
 }
 
 cleanup() {
     rm -f "$LOCKFILE"
+}
+
+emergency_restart() {
+    log "ERROR" "⚠ Fehler aufgetreten — starte Container als Notfall-Maßnahme neu..."
+    start_deployment_stack || true
+    start_other_containers || true
+    log "WARNING" "Container wurden nach Fehler neu gestartet"
 }
 
 trap cleanup EXIT
@@ -41,7 +86,6 @@ detect_deployment_system() {
     if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "coolify"; then
         DEPLOYMENT_SYSTEM="coolify"
         
-        # Finde Coolify-Pfad
         local coolify_paths=(
             "/data/coolify/source"
             "/opt/coolify/source"
@@ -64,7 +108,6 @@ detect_deployment_system() {
     if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "dokploy"; then
         DEPLOYMENT_SYSTEM="dokploy"
         
-        # Finde Dokploy-Pfad
         local dokploy_paths=(
             "/etc/dokploy"
             "/opt/dokploy"
@@ -101,6 +144,9 @@ check_prerequisites() {
     # Atomic lock
     exec 9>"$LOCKFILE"
     flock -n 9 || { log "ERROR" "Script läuft bereits (Lock: $LOCKFILE)"; exit 1; }
+    
+    # Log-Rotation
+    rotate_log
     
     # Erkenne Deployment-System
     detect_deployment_system
@@ -164,16 +210,42 @@ stop_dokploy_containers() {
 
 stop_generic_containers() {
     log "INFO" "Stoppe alle Docker-Container..."
-    local containers=$(docker ps -q)
+    local containers
+    containers=$(docker ps -q)
     if [[ -n "$containers" ]]; then
         docker stop $containers 2>/dev/null || true
     fi
 }
 
+# =====================================
+# apt mit Lock-Retry
+# =====================================
+wait_for_apt_lock() {
+    local waited=0
+    while fuser /var/lib/apt/lists/lock >/dev/null 2>&1 || \
+          fuser /var/lib/dpkg/lock >/dev/null 2>&1 || \
+          fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
+        
+        if [[ $waited -ge $APT_LOCK_WAIT ]]; then
+            log "ERROR" "Apt-Lock konnte nach ${APT_LOCK_WAIT}s nicht erhalten werden"
+            return 1
+        fi
+        
+        log "INFO" "Warte auf apt-Lock... (${waited}/${APT_LOCK_WAIT}s)"
+        sleep "$APT_LOCK_INTERVAL"
+        waited=$((waited + APT_LOCK_INTERVAL))
+    done
+    log "INFO" "Apt-Lock verfügbar"
+}
+
 update_system() {
     log "INFO" "Starte System-Updates..."
     
+    # Warte auf apt-Lock
+    wait_for_apt_lock || return 1
+    
     # Update Paketlisten
+    log "INFO" "Aktualisiere Paketlisten..."
     apt-get update || {
         log "ERROR" "apt-get update fehlgeschlagen"
         return 1
@@ -183,25 +255,24 @@ update_system() {
     log "INFO" "Halte problematische Pakete zurück..."
     apt-mark hold snapd ubuntu-advantage-tools 2>/dev/null || true
     
-    # Führe Updates durch
-    DEBIAN_FRONTEND=noninteractive apt-get upgrade -y || {
+    # Führe Updates durch (nur upgrade, kein dist-upgrade)
+    log "INFO" "Führe Paket-Updates durch..."
+    DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" || {
         log "ERROR" "apt-get upgrade fehlgeschlagen"
         return 1
     }
     
-    # Kernel-Updates
-    DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y || {
-        log "ERROR" "apt-get dist-upgrade fehlgeschlagen"
-        return 1
-    }
-    
     # Aufräumen
+    log "INFO" "Räume alte Pakete auf..."
     apt-get autoremove -y
     apt-get autoclean
     
     log "SUCCESS" "System-Updates abgeschlossen"
 }
 
+# =====================================
+# Container starten
+# =====================================
 start_deployment_stack() {
     case "$DEPLOYMENT_SYSTEM" in
         coolify)
@@ -228,7 +299,6 @@ start_coolify_stack() {
         sleep 10
         
         # 2. Soketi (Realtime) - KRITISCH!
-        # HINWEIS: Ältere Coolify-Versionen verwenden "soketi", neuere "coolify-realtime"
         log "INFO" "Starte Soketi (Realtime Service)..."
         docker compose up -d coolify-realtime 2>/dev/null || docker-compose up -d coolify-realtime
         sleep 10
@@ -285,7 +355,6 @@ verify_coolify_services() {
         all_ok=false
     fi
 
-    # Prüfe Hauptcontainer (nicht coolify-db, coolify-redis, etc.)
     if docker ps --format '{{.Names}}' | grep -qx "coolify"; then
         log "SUCCESS" "✓ Coolify Hauptservice läuft"
     else
@@ -386,7 +455,8 @@ start_other_containers() {
     
     docker ps -a --format '{{.Names}}\t{{.State}}' | grep -v "^${system_prefix}" | while IFS=$'\t' read -r name state; do
         if [[ "$state" != "running" ]] && [[ -n "$name" ]]; then
-            local restart_policy=$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$name" 2>/dev/null || echo "")
+            local restart_policy
+            restart_policy=$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$name" 2>/dev/null || echo "")
             
             if [[ "$restart_policy" == "always" ]] || [[ "$restart_policy" == "unless-stopped" ]]; then
                 log "INFO" "Starte Container: $name"
@@ -408,11 +478,16 @@ check_reboot_required() {
             log "WARNING" "  - $pkg"
         done < <(cat /var/run/reboot-required.pkgs 2>/dev/null)
         
-        log "INFO" "Starte Neustart in 30 Sekunden..."
-        log "INFO" "Drücken Sie Ctrl+C zum Abbrechen"
-        sleep 30
-        log "INFO" "Starte Neustart..."
-        reboot
+        # Prüfe ob wir in einem Terminal laufen (nicht cron)
+        if [[ -t 0 ]]; then
+            log "INFO" "Neustart in ${REBOOT_DELAY} Sekunden... (Ctrl+C zum Abbrechen)"
+            sleep "$REBOOT_DELAY"
+            log "INFO" "Starte Neustart..."
+            reboot
+        else
+            log "WARNING" "Automatischer Reboot übersprungen (kein Terminal)"
+            log "WARNING" "Bitte manuell neustarten: reboot"
+        fi
     else
         log "INFO" "Kein Neustart erforderlich"
     fi
@@ -428,7 +503,7 @@ show_final_status() {
 # =====================================
 main() {
     log "INFO" "========================================="
-    log "INFO" "VPS Auto-Update gestartet"
+    log "INFO" "VPS Auto-Update v2.0 gestartet"
     log "INFO" "========================================="
     log "INFO" "Datum: $(date)"
     log "INFO" "Server: $(hostname)"
@@ -442,8 +517,14 @@ main() {
     # Docker-Container stoppen
     stop_docker_containers
     
-    # System aktualisieren
-    update_system
+    # System aktualisieren (mit Error-Recovery)
+    if ! update_system; then
+        log "ERROR" "System-Update fehlgeschlagen — starte Container als Notfall-Maßnahme neu..."
+        emergency_restart
+        show_final_status
+        log "ERROR" "VPS Auto-Update mit Fehlern abgebrochen"
+        exit 1
+    fi
     
     # Deployment-Stack starten
     start_deployment_stack
