@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # vps-update-auto.sh
 # Intelligentes VPS Update-Skript das automatisch Coolify oder Dokploy erkennt
-# Version 2.0
+# Version 2.1
 
 set -euo pipefail
 
@@ -22,23 +22,19 @@ LOG_MAX_SIZE="${LOG_MAX_SIZE:-1048576}"
 # Reboot: Countdown in Sekunden (Standard: 60)
 REBOOT_DELAY="${REBOOT_DELAY:-60}"
 
+# Disk: Mindestfreier Speicher in MB (Standard: 500MB)
+DISK_MIN_FREE_MB="${DISK_MIN_FREE_MB:-500}"
+
+# Docker Cleanup: Alte Images älter als X Tage entfernen (Standard: 30)
+DOCKER_CLEANUP_DAYS="${DOCKER_CLEANUP_DAYS:-30}"
+
 # Wird automatisch erkannt
 DEPLOYMENT_SYSTEM=""
 DEPLOYMENT_PATH=""
 
-# Docker Compose Befehl erkennen
-DOCKER_COMPOSE=""
-detect_docker_compose() {
-    if docker compose version >/dev/null 2>&1; then
-        DOCKER_COMPOSE="docker compose"
-    elif command -v docker-compose >/dev/null 2>&1; then
-        DOCKER_COMPOSE="docker-compose"
-    else
-        log "ERROR" "Weder 'docker compose' noch 'docker-compose' gefunden"
-        exit 1
-    fi
-    log "INFO" "Docker Compose: $DOCKER_COMPOSE"
-}
+# Laufzeit-Tracking
+SECONDS=0
+PHASE_START=0
 
 # =====================================
 # Farben
@@ -47,6 +43,7 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+CYAN='\033[0;36m'
 NC='\033[0m'
 
 # =====================================
@@ -61,13 +58,41 @@ log() {
         SUCCESS) color="$GREEN" ;;
         WARNING) color="$YELLOW" ;;
         ERROR)   color="$RED" ;;
+        PHASE)   color="$CYAN" ;;
     esac
     local msg="[$(date '+%Y-%m-%d %H:%M:%S')] [$level] $*"
     echo -e "${color}${msg}${NC}" | tee -a "$LOGFILE"
 }
 
+phase_start() {
+    PHASE_START=$SECONDS
+}
+
+phase_end() {
+    local name="$1"
+    local duration=$(( SECONDS - PHASE_START ))
+    local mins=$(( duration / 60 ))
+    local secs=$(( duration % 60 ))
+    if [[ $mins -gt 0 ]]; then
+        log "PHASE" "⏱ ${name}: ${mins}m ${secs}s"
+    else
+        log "PHASE" "⏱ ${name}: ${secs}s"
+    fi
+}
+
+format_duration() {
+    local total=$1
+    local mins=$(( total / 60 ))
+    local secs=$(( total % 60 ))
+    if [[ $mins -gt 0 ]]; then
+        echo "${mins}m ${secs}s"
+    else
+        echo "${secs}s"
+    fi
+}
+
 rotate_log() {
-    if [[ -f "$LOGFILE" ]] && [[ $(stat -f%z "$LOGFILE" 2>/dev/null || stat -c%s "$LOGFILE" 2>/dev/null) -gt "$LOG_MAX_SIZE" ]]; then
+    if [[ -f "$LOGFILE" ]] && [[ $(stat -c%s "$LOGFILE" 2>/dev/null || stat -f%z "$LOGFILE" 2>/dev/null) -gt "$LOG_MAX_SIZE" ]]; then
         local backup="${LOGFILE}.$(date '+%Y%m%d%H%M%S')"
         mv "$LOGFILE" "$backup"
         gzip "$backup" 2>/dev/null || true
@@ -89,6 +114,21 @@ emergency_restart() {
 }
 
 trap cleanup EXIT
+
+# =====================================
+# Docker Compose Erkennung
+# =====================================
+DOCKER_COMPOSE=""
+detect_docker_compose() {
+    if docker compose version >/dev/null 2>&1; then
+        DOCKER_COMPOSE="docker compose"
+    elif command -v docker-compose >/dev/null 2>&1; then
+        DOCKER_COMPOSE="docker-compose"
+    else
+        log "WARNING" "Weder 'docker compose' noch 'docker-compose' gefunden (nur docker start verfügbar)"
+    fi
+    [[ -n "$DOCKER_COMPOSE" ]] && log "INFO" "Docker Compose: $DOCKER_COMPOSE"
+}
 
 # =====================================
 # Auto-Detection
@@ -146,7 +186,7 @@ detect_deployment_system() {
 }
 
 # =====================================
-# Hauptfunktionen
+# Voraussetzungen prüfen
 # =====================================
 check_prerequisites() {
     # Root-Check
@@ -169,7 +209,40 @@ check_prerequisites() {
     detect_deployment_system
 }
 
+# =====================================
+# Disk Space Check
+# =====================================
+check_disk_space() {
+    phase_start
+    log "INFO" "Prüfe freien Speicherplatz..."
+    
+    local root_free
+    root_free=$(df -BM / | awk 'NR==2 {gsub(/M/,""); print $4}')
+    
+    if [[ $root_free -lt $DISK_MIN_FREE_MB ]]; then
+        log "ERROR" "Nur ${root_free}MB frei auf / (Minimum: ${DISK_MIN_FREE_MB}MB)"
+        log "ERROR" "Update abgebrochen — zu wenig Speicherplatz!"
+        return 1
+    fi
+    
+    log "SUCCESS" "✓ ${root_free}MB frei auf / (Minimum: ${DISK_MIN_FREE_MB}MB)"
+    
+    # /var prüfen (separates Volume möglich)
+    local var_free
+    var_free=$(df -BM /var | awk 'NR==2 {gsub(/M/,""); print $4}')
+    if [[ $var_free -lt 200 ]]; then
+        log "WARNING" "Nur ${var_free}MB frei auf /var — apt könnte Probleme haben"
+    fi
+    
+    phase_end "Disk Space Check"
+}
+
+# =====================================
+# Docker-Container stoppen
+# =====================================
 stop_docker_containers() {
+    phase_start
+    
     log "INFO" "Stoppe Docker-Container..."
     
     case "$DEPLOYMENT_SYSTEM" in
@@ -185,6 +258,7 @@ stop_docker_containers() {
     esac
     
     log "SUCCESS" "Container gestoppt"
+    phase_end "Container stoppen"
 }
 
 stop_coolify_containers() {
@@ -256,6 +330,8 @@ wait_for_apt_lock() {
 }
 
 update_system() {
+    phase_start
+    
     log "INFO" "Starte System-Updates..."
     
     # Warte auf apt-Lock
@@ -267,6 +343,24 @@ update_system() {
         log "ERROR" "apt-get update fehlgeschlagen"
         return 1
     }
+    
+    # Liste aktualisierbarer Pakete
+    local upgradable
+    upgradable=$(apt list --upgradable 2>/dev/null | grep -v "^Listing" || true)
+    
+    if [[ -z "$upgradable" ]]; then
+        log "INFO" "Keine Paket-Updates verfügbar"
+        phase_end "System-Update (keine Updates)"
+        return 0
+    fi
+    
+    # Zeige was aktualisiert wird
+    local pkg_count
+    pkg_count=$(echo "$upgradable" | wc -l)
+    log "INFO" "${pkg_count} Pakete werden aktualisiert:"
+    echo "$upgradable" | while read -r line; do
+        log "INFO" "  → $line"
+    done
     
     # Halte problematische Pakete zurück
     log "INFO" "Halte problematische Pakete zurück..."
@@ -284,13 +378,65 @@ update_system() {
     apt-get autoremove -y
     apt-get autoclean
     
-    log "SUCCESS" "System-Updates abgeschlossen"
+    log "SUCCESS" "System-Updates abgeschlossen (${pkg_count} Pakete aktualisiert)"
+    phase_end "System-Update (${pkg_count} Pakete)"
+}
+
+# =====================================
+# Docker Cleanup
+# =====================================
+docker_cleanup() {
+    phase_start
+    
+    log "INFO" "Räume Docker auf (Images älter als ${DOCKER_CLEANUP_DAYS} Tage)..."
+    
+    # Dangling Images (ungetaggt)
+    local dangling_count
+    dangling_count=$(docker images -f "dangling=true" -q | wc -l)
+    if [[ $dangling_count -gt 0 ]]; then
+        log "INFO" "  Entferne ${dangling_count} ungetagte Images..."
+        docker image prune -f >/dev/null 2>&1 || true
+    fi
+    
+    # Alte Images
+    local reclaimed
+    reclaimed=$(docker image prune -a --filter "until=${DOCKER_CLEANUP_DAYS}h" -f 2>/dev/null | grep "Total reclaimed space" || true)
+    if [[ -n "$reclaimed" ]]; then
+        log "SUCCESS" "  $reclaimed"
+    else
+        log "INFO" "  Keine alten Images zum Entfernen"
+    fi
+    
+    # Build Cache
+    docker builder prune -f --filter "until=${DOCKER_CLEANUP_DAYS}h" >/dev/null 2>&1 || true
+    
+    # Volumes (nur dangling, keine aktiven!)
+    local dangling_volumes
+    dangling_volumes=$(docker volume ls -f "dangling=true" -q | wc -l)
+    if [[ $dangling_volumes -gt 0 ]]; then
+        log "INFO" "  Entferne ${dangling_volumes} ungenutzte Volumes..."
+        docker volume prune -f >/dev/null 2>&1 || true
+    fi
+    
+    # Docker Disk Usage Summary
+    local docker_disk
+    docker_disk=$(docker system df --format '{{.Type}}: {{.Size}}' 2>/dev/null || true)
+    if [[ -n "$docker_disk" ]]; then
+        log "INFO" "  Docker Speicherverbrauch:"
+        echo "$docker_disk" | while read -r line; do
+            log "INFO" "    $line"
+        done
+    fi
+    
+    phase_end "Docker Cleanup"
 }
 
 # =====================================
 # Container starten
 # =====================================
 start_deployment_stack() {
+    phase_start
+    
     case "$DEPLOYMENT_SYSTEM" in
         coolify)
             start_coolify_stack
@@ -302,6 +448,8 @@ start_deployment_stack() {
             log "INFO" "Kein Deployment-System erkannt, überspringe..."
             ;;
     esac
+    
+    phase_end "Deployment-Stack starten"
 }
 
 start_coolify_stack() {
@@ -429,6 +577,8 @@ verify_dokploy_services() {
 }
 
 start_other_containers() {
+    phase_start
+    
     log "INFO" "Starte andere Container mit Restart-Policy..."
     
     local system_prefix
@@ -451,8 +601,147 @@ start_other_containers() {
     done
     
     log "SUCCESS" "Andere Container gestartet"
+    phase_end "Andere Container starten"
 }
 
+# =====================================
+# Docker Health Check
+# =====================================
+check_container_health() {
+    phase_start
+    
+    log "INFO" "Prüfe Container-Gesundheit..."
+    
+    local unhealthy_found=false
+    
+    # Prüfe alle laufenden Container auf Health-Status
+    while IFS=$'\t' read -r name health; do
+        if [[ -z "$name" ]]; then
+            continue
+        fi
+        
+        case "$health" in
+            "healthy")
+                log "SUCCESS" "  ✓ $name: healthy"
+                ;;
+            "unhealthy")
+                log "ERROR" "  ✗ $name: UNHEALTHY!"
+                unhealthy_found=true
+                # Zeige Logs des unhealthy Containers
+                local last_logs
+                last_logs=$(docker logs --tail 5 "$name" 2>&1 || true)
+                if [[ -n "$last_logs" ]]; then
+                    log "ERROR" "    Letzte Logs:"
+                    echo "$last_logs" | while read -r line; do
+                        log "ERROR" "      $line"
+                    done
+                fi
+                ;;
+            "starting")
+                log "WARNING" "  ⏳ $name: noch am Starten..."
+                ;;
+            "")
+                # Kein Healthcheck definiert — Container-Status prüfen
+                local running
+                running=$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null || echo "false")
+                if [[ "$running" == "true" ]]; then
+                    log "INFO" "  • $name: läuft (kein Healthcheck)"
+                fi
+                ;;
+        esac
+    done < <(docker ps --format '{{.Names}}\t{{.Status}}' | \
+        sed -E 's/(.*)Up [0-9]+ .*\(health: ([a-z]+)\)/\1\t\2/' | \
+        while IFS=$'\t' read -r name health; do
+            # Extrahiere Health aus Status-Feld falls vorhanden
+            echo -e "$name\t$health"
+        done)
+    
+    # Einfachere Alternative: docker inspect für Health
+    while read -r name; do
+        [[ -z "$name" ]] && continue
+        local health
+        health=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$name" 2>/dev/null || true)
+        if [[ -n "$health" ]]; then
+            case "$health" in
+                healthy)   log "SUCCESS" "  ✓ $name: healthy" ;;
+                unhealthy) log "ERROR" "  ✗ $name: UNHEALTHY!"; unhealthy_found=true ;;
+                starting)  log "WARNING" "  ⏳ $name: startet..." ;;
+            esac
+        fi
+    done < <(docker ps --format '{{.Names}}')
+    
+    if [[ "$unhealthy_found" == true ]]; then
+        log "ERROR" "⚠ Ein oder mehrere Container sind unhealthy!"
+    else
+        log "SUCCESS" "Alle Container sind gesund"
+    fi
+    
+    phase_end "Health Check"
+}
+
+# =====================================
+# Security Check
+# =====================================
+security_check() {
+    phase_start
+    
+    log "INFO" "=== Security Quick Check ==="
+    
+    # 1. Fehlgeschlagene SSH-Logins (letzte 24h)
+    local ssh_failed=0
+    if [[ -f /var/log/auth.log ]]; then
+        ssh_failed=$(grep -c "Failed password" /var/log/auth.log 2>/dev/null || echo "0")
+    elif journalctl --version >/dev/null 2>&1; then
+        ssh_failed=$(journalctl -u sshd --since "24 hours ago" --no-pager 2>/dev/null | grep -c "Failed password" || echo "0")
+    fi
+    
+    if [[ $ssh_failed -gt 100 ]]; then
+        log "WARNING" "🔒 ${ssh_failed} fehlgeschlagene SSH-Logins in den letzten 24h"
+    elif [[ $ssh_failed -gt 0 ]]; then
+        log "INFO" "🔒 ${ssh_failed} fehlgeschlagene SSH-Logins (normal)"
+    else
+        log "SUCCESS" "🔒 Keine fehlgeschlagenen SSH-Logins"
+    fi
+    
+    # 2. Aktive SSH-Sessions
+    local ssh_sessions
+    ssh_sessions=$(who 2>/dev/null | wc -l || echo "0")
+    log "INFO" "👤 ${ssh_sessions} aktive Session(s)"
+    
+    # 3. Offene Ports (nur wichtige)
+    log "INFO" "🔍 Offene Ports:"
+    if command -v ss >/dev/null 2>&1; then
+        ss -tlnp 2>/dev/null | grep "LISTEN" | awk '{print $4, $6}' | sed 's/.*://' | sort -un | while read -r port; do
+            local service
+            service=$(ss -tlnp 2>/dev/null | grep ":${port} " | head -1 | grep -oP 'users:\(\("\K[^"]+' || echo "unknown")
+            log "INFO" "    :${port} (${service})"
+        done
+    fi
+    
+    # 4. UFW Status
+    if command -v ufw >/dev/null 2>&1; then
+        local ufw_status
+        ufw_status=$(ufw status 2>/dev/null | head -1 || true)
+        if echo "$ufw_status" | grep -q "active"; then
+            log "SUCCESS" "🛡 Firewall (UFW): aktiv"
+        else
+            log "WARNING" "🛡 Firewall (UFW): INAKTIV"
+        fi
+    fi
+    
+    # 5. Letzter Login
+    local last_login
+    last_login=$(last -1 root 2>/dev/null | head -1 || true)
+    if [[ -n "$last_login" ]]; then
+        log "INFO" "🔑 Letzter root-Login: $last_login"
+    fi
+    
+    phase_end "Security Check"
+}
+
+# =====================================
+# Reboot prüfen
+# =====================================
 check_reboot_required() {
     log "INFO" "Prüfe ob Neustart erforderlich..."
     
@@ -484,20 +773,68 @@ show_final_status() {
 }
 
 # =====================================
+# Update Summary
+# =====================================
+show_summary() {
+    local total_duration=$SECONDS
+    
+    log "INFO" "========================================="
+    log "INFO" "📊 UPDATE-ZUSAMMENFASSUNG"
+    log "INFO" "========================================="
+    log "INFO" "Server:     $(hostname)"
+    log "INFO" "System:     ${DEPLOYMENT_SYSTEM^^}"
+    log "INFO" "Dauer:      $(format_duration $total_duration)"
+    log "INFO" "Kernel:     $(uname -r)"
+    
+    # Uptime
+    local uptime_str
+    uptime_str=$(uptime -p 2>/dev/null || echo "unbekannt")
+    log "INFO" "Uptime:     $uptime_str"
+    
+    # Disk Usage
+    local disk_used disk_total disk_pct
+    disk_used=$(df -h / | awk 'NR==2 {print $3}')
+    disk_total=$(df -h / | awk 'NR==2 {print $2}')
+    disk_pct=$(df -h / | awk 'NR==2 {print $5}')
+    log "INFO" "Disk:       ${disk_used} / ${disk_total} (${disk_pct} belegt)"
+    
+    # Memory
+    local mem_used mem_total
+    mem_used=$(free -h | awk '/Mem:/ {print $3}')
+    mem_total=$(free -h | awk '/Mem:/ {print $2}')
+    log "INFO" "RAM:        ${mem_used} / ${mem_total}"
+    
+    # Docker Container
+    local running total
+    running=$(docker ps -q | wc -l)
+    total=$(docker ps -a -q | wc -l)
+    log "INFO" "Container:  ${running}/${total} laufen"
+    
+    log "INFO" "========================================="
+}
+
+# =====================================
 # Hauptprogramm
 # =====================================
 main() {
     log "INFO" "========================================="
-    log "INFO" "VPS Auto-Update v2.0 gestartet"
+    log "INFO" "VPS Auto-Update v2.1 gestartet"
     log "INFO" "========================================="
     log "INFO" "Datum: $(date)"
     log "INFO" "Server: $(hostname)"
+    log "INFO" "Kernel: $(uname -r)"
     
     # Voraussetzungen prüfen & System erkennen
     check_prerequisites
     
     log "INFO" "Erkanntes System: ${DEPLOYMENT_SYSTEM^^}"
     [[ -n "$DEPLOYMENT_PATH" ]] && log "INFO" "Pfad: $DEPLOYMENT_PATH"
+    
+    # Disk Space Check
+    if ! check_disk_space; then
+        log "ERROR" "Abbruch: Nicht genug Speicherplatz"
+        exit 1
+    fi
     
     # Docker-Container stoppen
     stop_docker_containers
@@ -511,20 +848,33 @@ main() {
         exit 1
     fi
     
+    # Docker Cleanup
+    docker_cleanup
+    
     # Deployment-Stack starten
     start_deployment_stack
     
     # Andere Container starten
     start_other_containers
     
+    # Docker Health Check
+    check_container_health
+    
     # Status anzeigen
     show_final_status
+    
+    # Security Check
+    security_check
     
     # Reboot prüfen
     check_reboot_required
     
+    # Zusammenfassung
+    show_summary
+    
     log "SUCCESS" "========================================="
     log "SUCCESS" "VPS Auto-Update abgeschlossen"
+    log "SUCCESS" "Gesamtdauer: $(format_duration $SECONDS)"
     log "SUCCESS" "========================================="
 }
 
