@@ -26,6 +26,20 @@ REBOOT_DELAY="${REBOOT_DELAY:-60}"
 DEPLOYMENT_SYSTEM=""
 DEPLOYMENT_PATH=""
 
+# Docker Compose Befehl erkennen
+DOCKER_COMPOSE=""
+detect_docker_compose() {
+    if docker compose version >/dev/null 2>&1; then
+        DOCKER_COMPOSE="docker compose"
+    elif command -v docker-compose >/dev/null 2>&1; then
+        DOCKER_COMPOSE="docker-compose"
+    else
+        log "ERROR" "Weder 'docker compose' noch 'docker-compose' gefunden"
+        exit 1
+    fi
+    log "INFO" "Docker Compose: $DOCKER_COMPOSE"
+}
+
 # =====================================
 # Farben
 # =====================================
@@ -148,6 +162,9 @@ check_prerequisites() {
     # Log-Rotation
     rotate_log
     
+    # Docker Compose erkennen
+    detect_docker_compose
+
     # Erkenne Deployment-System
     detect_deployment_system
 }
@@ -295,22 +312,22 @@ start_coolify_stack() {
         
         # 1. Datenbank und Cache
         log "INFO" "Starte Datenbank und Redis..."
-        docker compose up -d coolify-db coolify-redis 2>/dev/null || docker-compose up -d coolify-db coolify-redis
+        $DOCKER_COMPOSE up -d coolify-db coolify-redis
         sleep 10
         
         # 2. Soketi (Realtime) - KRITISCH!
         log "INFO" "Starte Soketi (Realtime Service)..."
-        docker compose up -d coolify-realtime 2>/dev/null || docker-compose up -d coolify-realtime
+        $DOCKER_COMPOSE up -d coolify-realtime
         sleep 10
         
         # 3. Hauptcontainer
         log "INFO" "Starte Coolify Hauptservice..."
-        docker compose up -d coolify 2>/dev/null || docker-compose up -d coolify
+        $DOCKER_COMPOSE up -d coolify
         sleep 10
         
         # 4. Proxy
         log "INFO" "Starte Coolify Proxy..."
-        docker compose up -d coolify-proxy 2>/dev/null || docker-compose up -d coolify-proxy
+        $DOCKER_COMPOSE up -d coolify-proxy
         sleep 5
     else
         # Fallback: Manuelle Container-Starts
@@ -380,17 +397,17 @@ start_dokploy_stack() {
         
         # 1. Datenbank und Redis
         log "INFO" "Starte PostgreSQL und Redis..."
-        docker compose up -d dokploy-postgres dokploy-redis 2>/dev/null || docker-compose up -d dokploy-postgres dokploy-redis
+        $DOCKER_COMPOSE up -d dokploy-postgres dokploy-redis
         sleep 10
         
         # 2. Hauptcontainer (KEIN Soketi bei Dokploy)
         log "INFO" "Starte Dokploy Hauptservice..."
-        docker compose up -d dokploy 2>/dev/null || docker-compose up -d dokploy
+        $DOCKER_COMPOSE up -d dokploy
         sleep 10
         
         # 3. Traefik
         log "INFO" "Starte Traefik Proxy..."
-        docker compose up -d dokploy-traefik 2>/dev/null || docker-compose up -d dokploy-traefik
+        $DOCKER_COMPOSE up -d dokploy-traefik
         sleep 5
     else
         # Fallback: Manuelle Container-Starts

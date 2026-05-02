@@ -12,6 +12,20 @@ LOGFILE="/var/log/docker-autostart.log"
 DEPLOYMENT_SYSTEM=""
 DEPLOYMENT_PATH=""
 
+# Docker Compose Befehl erkennen
+DOCKER_COMPOSE=""
+detect_docker_compose() {
+    if docker compose version >/dev/null 2>&1; then
+        DOCKER_COMPOSE="docker compose"
+    elif command -v docker-compose >/dev/null 2>&1; then
+        DOCKER_COMPOSE="docker-compose"
+    else
+        log "✗ ERROR: Weder 'docker compose' noch 'docker-compose' gefunden"
+        exit 1
+    fi
+    log "Docker Compose: $DOCKER_COMPOSE"
+}
+
 # =====================================
 # Hilfsfunktionen
 # =====================================
@@ -98,19 +112,19 @@ start_coolify() {
         
         # KRITISCH: Starte in der richtigen Reihenfolge!
         log "→ Starte DB und Redis..."
-        docker compose up -d coolify-db coolify-redis 2>/dev/null || docker-compose up -d coolify-db coolify-redis
+        $DOCKER_COMPOSE up -d coolify-db coolify-redis
         sleep 10
         
         log "→ Starte Realtime (Soketi)..."
-        docker compose up -d coolify-realtime 2>/dev/null || docker-compose up -d coolify-realtime
+        $DOCKER_COMPOSE up -d coolify-realtime
         sleep 10
         
         log "→ Starte Coolify Hauptcontainer..."
-        docker compose up -d coolify 2>/dev/null || docker-compose up -d coolify
+        $DOCKER_COMPOSE up -d coolify
         sleep 10
         
         log "→ Starte Proxy..."
-        docker compose up -d coolify-proxy 2>/dev/null || docker-compose up -d coolify-proxy
+        $DOCKER_COMPOSE up -d coolify-proxy
         sleep 5
     else
         log "Starte Container manuell (kein docker-compose.yml gefunden)..."
@@ -161,7 +175,7 @@ start_dokploy() {
     if [[ -n "$DEPLOYMENT_PATH" ]]; then
         cd "$DEPLOYMENT_PATH"
         log "Verwende docker-compose aus $DEPLOYMENT_PATH"
-        docker compose up -d 2>/dev/null || docker-compose up -d
+        $DOCKER_COMPOSE up -d
     else
         log "Starte Container manuell (kein docker-compose.yml gefunden)..."
         
@@ -235,6 +249,9 @@ main() {
     # Warte auf Docker
     wait_for_docker
     
+    # Erkenne Docker Compose
+    detect_docker_compose
+
     # Erkenne System
     detect_deployment_system
     log "System: ${DEPLOYMENT_SYSTEM^^}"
