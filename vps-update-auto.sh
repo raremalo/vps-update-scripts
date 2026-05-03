@@ -32,6 +32,16 @@ DOCKER_CLEANUP_DAYS="${DOCKER_CLEANUP_DAYS:-30}"
 DEPLOYMENT_SYSTEM=""
 DEPLOYMENT_PATH=""
 
+# Swarm-Erkennung
+IS_SWARM=false
+
+# Dokploy Swarm Service-Namen
+DOKPLOY_SVC_POSTGRES=""
+DOKPLOY_SVC_REDIS=""
+DOKPLOY_SVC_MAIN=""
+DOKPLOY_SVC_TRAEFIK=""
+declare -A DOKPLOY_SVC_REPLICAS
+
 # Laufzeit-Tracking
 SECONDS=0
 PHASE_START=0
@@ -159,8 +169,16 @@ detect_deployment_system() {
     fi
     
     # Prüfe auf Dokploy
-    if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "dokploy"; then
+    if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qi "dokploy"; then
         DEPLOYMENT_SYSTEM="dokploy"
+        
+        # Prüfe Docker Swarm
+        local swarm_state
+        swarm_state=$(docker info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null || echo "inactive")
+        if [[ "$swarm_state" == "active" ]]; then
+            IS_SWARM=true
+            log "INFO" "  Docker Swarm erkannt"
+        fi
         
         local dokploy_paths=(
             "/etc/dokploy"
@@ -176,7 +194,10 @@ detect_deployment_system() {
             fi
         done
         
-        log "SUCCESS" "✓ Dokploy erkannt"
+        # Erkenne Swarm-Services oder Container-Namen
+        detect_dokploy_services
+        
+        log "SUCCESS" "✓ Dokploy erkannt (Swarm: $IS_SWARM)"
         [[ -n "$DEPLOYMENT_PATH" ]] && log "INFO" "  Pfad: $DEPLOYMENT_PATH"
         return 0
     fi
@@ -283,20 +304,27 @@ stop_coolify_containers() {
 }
 
 stop_dokploy_containers() {
-    log "INFO" "Stoppe Dokploy-Container in korrekter Reihenfolge..."
+    log "INFO" "Stoppe Dokploy in korrekter Reihenfolge..."
     
-    # 1. Traefik Proxy
-    docker stop dokploy-traefik 2>/dev/null || true
-    sleep 2
-    
-    # 2. Hauptcontainer
-    docker stop dokploy 2>/dev/null || true
-    sleep 2
-    
-    # 3. Datenbank und Redis
-    docker stop dokploy-redis 2>/dev/null || true
-    docker stop dokploy-postgres 2>/dev/null || true
-    sleep 2
+    if [[ "$IS_SWARM" == "true" ]]; then
+        # Docker Swarm: Scale auf 0
+        [[ -n "$DOKPLOY_SVC_TRAEFIK" ]] && { log "INFO" "Stoppe $DOKPLOY_SVC_TRAEFIK..."; docker service scale "$DOKPLOY_SVC_TRAEFIK=0" 2>/dev/null || true; }
+        sleep 2
+        [[ -n "$DOKPLOY_SVC_MAIN" ]] && { log "INFO" "Stoppe $DOKPLOY_SVC_MAIN..."; docker service scale "$DOKPLOY_SVC_MAIN=0" 2>/dev/null || true; }
+        sleep 2
+        [[ -n "$DOKPLOY_SVC_REDIS" ]] && { log "INFO" "Stoppe $DOKPLOY_SVC_REDIS..."; docker service scale "$DOKPLOY_SVC_REDIS=0" 2>/dev/null || true; }
+        [[ -n "$DOKPLOY_SVC_POSTGRES" ]] && { log "INFO" "Stoppe $DOKPLOY_SVC_POSTGRES..."; docker service scale "$DOKPLOY_SVC_POSTGRES=0" 2>/dev/null || true; }
+        sleep 3
+    else
+        # Regulärer Docker
+        docker stop dokploy-traefik 2>/dev/null || true
+        sleep 2
+        docker stop dokploy 2>/dev/null || true
+        sleep 2
+        docker stop dokploy-redis 2>/dev/null || true
+        docker stop dokploy-postgres 2>/dev/null || true
+        sleep 2
+    fi
 }
 
 stop_generic_containers() {
@@ -523,18 +551,55 @@ verify_coolify_services() {
 start_dokploy_stack() {
     log "INFO" "Starte Dokploy-Stack in korrekter Reihenfolge..."
     
-    # docker start bevorzugt — vermeidet compose-Validierungsfehler
-    log "INFO" "Starte PostgreSQL und Redis..."
-    docker start dokploy-postgres dokploy-redis 2>/dev/null || true
-    sleep 10
-    
-    log "INFO" "Starte Dokploy Hauptservice..."
-    docker start dokploy 2>/dev/null || true
-    sleep 10
-    
-    log "INFO" "Starte Traefik Proxy..."
-    docker start dokploy-traefik 2>/dev/null || true
-    sleep 5
+    if [[ "$IS_SWARM" == "true" ]]; then
+        # Docker Swarm: Scale Services hoch
+        local replicas
+        
+        # 1. PostgreSQL
+        if [[ -n "$DOKPLOY_SVC_POSTGRES" ]]; then
+            replicas="${DOKPLOY_SVC_REPLICAS[$DOKPLOY_SVC_POSTGRES]:-1}"
+            log "INFO" "Starte PostgreSQL ($DOKPLOY_SVC_POSTGRES)..."
+            docker service scale "$DOKPLOY_SVC_POSTGRES=$replicas" 2>/dev/null || true
+            sleep 10
+        fi
+        
+        # 2. Redis
+        if [[ -n "$DOKPLOY_SVC_REDIS" ]]; then
+            replicas="${DOKPLOY_SVC_REPLICAS[$DOKPLOY_SVC_REDIS]:-1}"
+            log "INFO" "Starte Redis ($DOKPLOY_SVC_REDIS)..."
+            docker service scale "$DOKPLOY_SVC_REDIS=$replicas" 2>/dev/null || true
+            sleep 5
+        fi
+        
+        # 3. Hauptservice
+        if [[ -n "$DOKPLOY_SVC_MAIN" ]]; then
+            replicas="${DOKPLOY_SVC_REPLICAS[$DOKPLOY_SVC_MAIN]:-1}"
+            log "INFO" "Starte Dokploy Hauptservice ($DOKPLOY_SVC_MAIN)..."
+            docker service scale "$DOKPLOY_SVC_MAIN=$replicas" 2>/dev/null || true
+            sleep 10
+        fi
+        
+        # 4. Traefik
+        if [[ -n "$DOKPLOY_SVC_TRAEFIK" ]]; then
+            replicas="${DOKPLOY_SVC_REPLICAS[$DOKPLOY_SVC_TRAEFIK]:-1}"
+            log "INFO" "Starte Traefik ($DOKPLOY_SVC_TRAEFIK)..."
+            docker service scale "$DOKPLOY_SVC_TRAEFIK=$replicas" 2>/dev/null || true
+            sleep 5
+        fi
+    else
+        # Regulärer Docker
+        log "INFO" "Starte PostgreSQL und Redis..."
+        docker start dokploy-postgres dokploy-redis 2>/dev/null || true
+        sleep 10
+        
+        log "INFO" "Starte Dokploy Hauptservice..."
+        docker start dokploy 2>/dev/null || true
+        sleep 10
+        
+        log "INFO" "Starte Traefik Proxy..."
+        docker start dokploy-traefik 2>/dev/null || true
+        sleep 5
+    fi
     
     # Verifizierung
     verify_dokploy_services
@@ -545,32 +610,41 @@ verify_dokploy_services() {
     
     local all_ok=true
     
-    if docker ps --format '{{.Names}}' | grep -qx "dokploy-postgres"; then
-        log "SUCCESS" "✓ Dokploy PostgreSQL läuft"
+    if [[ "$IS_SWARM" == "true" ]]; then
+        # Swarm: Prüfe Replicas-Spalte
+        verify_swarm_svc "$DOKPLOY_SVC_POSTGRES" "PostgreSQL" all_ok
+        verify_swarm_svc "$DOKPLOY_SVC_REDIS" "Redis" all_ok
+        verify_swarm_svc "$DOKPLOY_SVC_MAIN" "Dokploy" all_ok
+        verify_swarm_svc "$DOKPLOY_SVC_TRAEFIK" "Traefik" all_ok
     else
-        log "WARNING" "✗ Dokploy PostgreSQL läuft nicht!"
-        all_ok=false
-    fi
+        # Regulär: Pattern-Match auf Container-Namen
+        if docker ps --format '{{.Names}}' | grep -q "dokploy.*postgres"; then
+            log "SUCCESS" "✓ Dokploy PostgreSQL läuft"
+        else
+            log "WARNING" "✗ Dokploy PostgreSQL läuft nicht!"
+            all_ok=false
+        fi
 
-    if docker ps --format '{{.Names}}' | grep -qx "dokploy-redis"; then
-        log "SUCCESS" "✓ Dokploy Redis läuft"
-    else
-        log "WARNING" "✗ Dokploy Redis läuft nicht!"
-        all_ok=false
-    fi
+        if docker ps --format '{{.Names}}' | grep -q "dokploy.*redis"; then
+            log "SUCCESS" "✓ Dokploy Redis läuft"
+        else
+            log "WARNING" "✗ Dokploy Redis läuft nicht!"
+            all_ok=false
+        fi
 
-    if docker ps --format '{{.Names}}' | grep -qx "dokploy"; then
-        log "SUCCESS" "✓ Dokploy Hauptservice läuft"
-    else
-        log "ERROR" "✗ Dokploy Hauptservice läuft nicht!"
-        all_ok=false
-    fi
+        if docker ps --format '{{.Names}}' | grep -qE 'dokploy\.[0-9' | grep -qvE '(postgres|redis|traefik)'; then
+            log "SUCCESS" "✓ Dokploy Hauptservice läuft"
+        else
+            log "ERROR" "✗ Dokploy Hauptservice läuft nicht!"
+            all_ok=false
+        fi
 
-    if docker ps --format '{{.Names}}' | grep -qx "dokploy-traefik"; then
-        log "SUCCESS" "✓ Traefik Proxy läuft"
-    else
-        log "WARNING" "✗ Traefik Proxy läuft nicht!"
-        all_ok=false
+        if docker ps --format '{{.Names}}' | grep -q "dokploy-traefik"; then
+            log "SUCCESS" "✓ Traefik Proxy läuft"
+        else
+            log "WARNING" "✗ Traefik Proxy läuft nicht!"
+            all_ok=false
+        fi
     fi
     
     [[ "$all_ok" == true ]] && log "SUCCESS" "Dokploy-Stack vollständig gestartet"
@@ -767,8 +841,76 @@ check_reboot_required() {
     fi
 }
 
+# Erkenne Dokploy Swarm-Services
+# shellcheck disable=SC2317
+detect_dokploy_services() {
+    if [[ "$IS_SWARM" != "true" ]]; then
+        return 0
+    fi
+    
+    local all_services
+    all_services=$(docker service ls --format '{{.Name}}' 2>/dev/null | grep -i "dokploy" || true)
+    
+    [[ -z "$all_services" ]] && { log "WARNING" "Keine Dokploy-Swarm-Services gefunden"; return 0; }
+    
+    # Mappe Services zu Rollen
+    DOKPLOY_SVC_POSTGRES=$(echo "$all_services" | grep -iE 'postgres' | head -1) || true
+    DOKPLOY_SVC_REDIS=$(echo "$all_services" | grep -iE 'redis' | head -1) || true
+    DOKPLOY_SVC_TRAEFIK=$(echo "$all_services" | grep -iE 'traefik' | head -1) || true
+    DOKPLOY_SVC_MAIN=$(echo "$all_services" | grep -viE '(postgres|redis|traefik)' | head -1) || true
+    
+    log "INFO" "Swarm-Services erkannt:"
+    [[ -n "$DOKPLOY_SVC_POSTGRES" ]] && log "INFO" "  PostgreSQL: $DOKPLOY_SVC_POSTGRES" || log "WARNING" "  PostgreSQL: NICHT GEFUNDEN"
+    [[ -n "$DOKPLOY_SVC_REDIS" ]] && log "INFO" "  Redis: $DOKPLOY_SVC_REDIS" || log "WARNING" "  Redis: NICHT GEFUNDEN"
+    [[ -n "$DOKPLOY_SVC_MAIN" ]] && log "INFO" "  Hauptservice: $DOKPLOY_SVC_MAIN" || log "WARNING" "  Hauptservice: NICHT GEFUNDEN"
+    [[ -n "$DOKPLOY_SVC_TRAEFIK" ]] && log "INFO" "  Traefik: $DOKPLOY_SVC_TRAEFIK" || log "WARNING" "  Traefik: NICHT GEFUNDEN"
+    
+    # Speichere aktuelle Replika-Zahlen
+    for svc in $DOKPLOY_SVC_POSTGRES $DOKPLOY_SVC_REDIS $DOKPLOY_SVC_MAIN $DOKPLOY_SVC_TRAEFIK; do
+        [[ -z "$svc" ]] && continue
+        local replicas
+        replicas=$(docker service ls --format '{{.Name}} {{.Replicas}}' 2>/dev/null | grep "^${svc} " | awk '{print $2}' | cut -d'/' -f2 || echo "1")
+        DOKPLOY_SVC_REPLICAS["$svc"]="${replicas:-1}"
+    done
+}
+
+# Verifiziere Swarm-Service
+# shellcheck disable=SC2317
+verify_swarm_svc() {
+    local service="$1"
+    local label="$2"
+    # $3 is nameref to all_ok (bash 4.3+)
+    local -n _all_ok="$3"
+    
+    [[ -z "$service" ]] && return 0
+    
+    local replicas_info
+    replicas_info=$(docker service ls --format '{{.Name}} {{.Replicas}}' 2>/dev/null | grep "^${service} " || true)
+    
+    if [[ -n "$replicas_info" ]]; then
+        local current desired
+        current=$(echo "$replicas_info" | awk '{print $2}' | cut -d'/' -f1)
+        desired=$(echo "$replicas_info" | awk '{print $2}' | cut -d'/' -f2)
+        
+        if [[ "$current" == "$desired" ]] && [[ "$current" -gt 0 ]]; then
+            log "SUCCESS" "✓ $label ($service) läuft ($current/$desired)"
+        else
+            log "WARNING" "✗ $label ($service) nicht vollständig ($current/$desired)"
+            _all_ok=false
+            # Diagnose
+            docker service ps "$service" --format "table {{.Name}}\t{{.CurrentState}}\t{{.Error}}" 2>/dev/null | head -5 | tee -a "$LOGFILE" || true
+        fi
+    else
+        log "WARNING" "✗ $label ($service) nicht gefunden"
+        _all_ok=false
+    fi
+}
+
 show_final_status() {
-    log "INFO" "=== Finale Container-Status ==="
+    log "INFO" "=== Finale Status ==="
+    if [[ "$IS_SWARM" == "true" ]]; then
+        docker service ls --format "table {{.Name}}\t{{.Replicas}}\t{{.Image}}" 2>/dev/null | grep -E "(dokploy|NAME)" | tee -a "$LOGFILE" || true
+    fi
     docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" | head -20 | tee -a "$LOGFILE"
 }
 
