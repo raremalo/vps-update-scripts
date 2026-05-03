@@ -576,7 +576,7 @@ start_dokploy_stack() {
             replicas="${DOKPLOY_SVC_REPLICAS[$DOKPLOY_SVC_MAIN]:-1}"
             log "INFO" "Starte Dokploy Hauptservice ($DOKPLOY_SVC_MAIN)..."
             docker service scale "$DOKPLOY_SVC_MAIN=$replicas" 2>/dev/null || true
-            sleep 10
+            sleep 25
         fi
         
         # 4. Traefik
