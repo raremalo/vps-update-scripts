@@ -104,11 +104,88 @@ if [ -f /var/run/reboot-required ] || [[ -z $LATEST_KERNEL ]]; then
   NEED_REBOOT=true
 fi
 
+# KEEP IN SYNC: verify_ssh_before_reboot() existiert in allen 7 Update-Skripten
+# (vps-update-auto.sh, vps-update-complete.sh, coolify/, dokploy/, vps-update.sh,
+# vps-update-with-backup.sh, vps-update-simple.sh) — bei Änderungen ALLE pflegen.
+verify_ssh_before_reboot() {
+    log "=== SSH Pre-Flight Prüfung (vor Reboot) ===" "$BLUE"
+
+    # sshd-Binary im PATH? (cron/systemd haben evtl. kein /usr/sbin)
+    command -v sshd >/dev/null 2>&1 || {
+        err "sshd nicht im PATH — Reboot BLOCKIERT."
+        err "Reparatur: Pfad prüfen oder /usr/sbin/sshd nutzen."
+        return 1
+    }
+
+    # 1. sshd -t: Config-Syntax gültig? (short-circuit vor -T)
+    if ! sshd -t >/dev/null 2>&1; then
+        err "sshd-Config ungültig (sshd -t ≠ 0) — Reboot BLOCKIERT."
+        err "Manuelle Prüfung: sshd -t"
+        return 1
+    fi
+
+    # 2. sshd -T: effektiven Port ermitteln (auto-detect, NICHT hartkodiert 22)
+    local ssh_ports
+    if ! ssh_ports=$(sshd -T 2>/dev/null | awk '$1=="port"{print $2}' | sort -u); then
+        err "sshd -T fehlgeschlagen — Reboot BLOCKIERT."
+        return 1
+    fi
+    [[ -n "$ssh_ports" ]] || {
+        err "Kein SSH-Port via sshd -T ermittelbar — Reboot BLOCKIERT."
+        return 1
+    }
+
+    # 3. Lauscher-Check: jeder SSH-Port aktiv? (reuse ss -tlnp-Idiom :786-793)
+    local listening
+    listening=$(ss -tlnp 2>/dev/null | grep "LISTEN" | awk '{print $4}' | sed 's/.*://' | sort -un)
+    local p
+    for p in $ssh_ports; do
+        grep -qx "$p" <<<"$listening" || {
+            err "SSH-Port ${p} lauscht nicht — Reboot BLOCKIERT."
+            err "Reparatur: systemctl status ssh.socket ssh.service"
+            return 1
+        }
+    done
+
+    # 4. ssh.socket is-enabled (Boot-Persistenz), String-Dispatch + ssh.service-Fallback
+    local socket_state svc_state
+    socket_state=$(systemctl is-enabled ssh.socket 2>/dev/null) || true
+    case "$socket_state" in
+        enabled|static) : ;;
+        disabled|masked)
+            err "ssh.socket ist '${socket_state}' — Reboot BLOCKIERT."
+            err "Reparatur: systemctl enable ssh.socket"
+            return 1 ;;
+        not-found|"")
+            svc_state=$(systemctl is-enabled ssh.service 2>/dev/null) || true
+            case "$svc_state" in
+                enabled|static) : ;;
+                *)
+                    err "ssh.socket fehlt und ssh.service='${svc_state:-<leer>}' — Reboot BLOCKIERT."
+                    return 1 ;;
+            esac ;;
+        *)
+            err "ssh.socket: unbekannter Zustand '${socket_state}' — Reboot BLOCKIERT."
+            return 1 ;;
+    esac
+
+    log "✓ SSH Pre-Flight OK (Port(s): $(echo "$ssh_ports" | tr '\n' ' '))" "$GREEN"
+    return 0
+}
+
 if $NEED_REBOOT; then
-  log "Reboot nötig – Container werden nach dem Neustart automatisch gestartet..." "$YELLOW"
-  log "System startet in 10 s neu ..." "$YELLOW"
-  sleep 10
-  reboot
+  # SSH Pre-Flight: reboot-safe? Sonst nicht rebooten (Fall-through zu Section 5).
+  if verify_ssh_before_reboot; then
+    log "Reboot nötig – Container werden nach dem Neustart automatisch gestartet..." "$YELLOW"
+    log "System startet in 10 s neu ..." "$YELLOW"
+    sleep 10
+    reboot
+  else
+    err "Reboot wegen SSH-Pre-Flight blockiert — System bleibt oben."
+    err "SSH reparieren, dann manuell: reboot"
+    # Klärend: Section 5 startet Services neu, obwohl ein Reboot nötig war (blockiert).
+    log "Starte Services neu (Reboot war nötig, wurde aber blockiert)..." "$YELLOW"
+  fi
 fi
 
 # ---------- 5. Services neu starten (nur wenn kein Reboot nötig) ----------
