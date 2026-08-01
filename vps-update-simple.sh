@@ -257,16 +257,14 @@ verify_ssh_before_reboot() {
     socket_state=$(systemctl is-enabled ssh.socket 2>/dev/null) || true
     case "$socket_state" in
         enabled|static) : ;;
-        disabled|masked)
-            log_error "ssh.socket ist '${socket_state}' — Reboot BLOCKIERT."
-            log_error "Reparatur: systemctl enable ssh.socket"
-            return 1 ;;
-        not-found|"")
+        disabled|masked|not-found|"")
             svc_state=$(systemctl is-enabled ssh.service 2>/dev/null) || true
             case "$svc_state" in
-                enabled|static) : ;;
+                enabled|static)
+                    log_warning "ssh.socket='${socket_state:-<leer>}' — ssh.service='${svc_state}' übernimmt Boot-Persistenz (OK)." ;;
                 *)
-                    log_error "ssh.socket fehlt und ssh.service='${svc_state:-<leer>}' — Reboot BLOCKIERT."
+                    log_error "ssh.socket='${socket_state:-<leer>}' und ssh.service='${svc_state:-<leer>}' — Reboot BLOCKIERT."
+                    log_error "Reparatur: systemctl enable ssh.socket  ODER  systemctl enable ssh.service"
                     return 1 ;;
             esac ;;
         *)
