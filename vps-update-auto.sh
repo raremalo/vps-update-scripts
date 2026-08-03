@@ -28,6 +28,15 @@ DISK_MIN_FREE_MB="${DISK_MIN_FREE_MB:-500}"
 # Docker Cleanup: Alte Images älter als X Tage entfernen (Standard: 30)
 DOCKER_CLEANUP_DAYS="${DOCKER_CLEANUP_DAYS:-30}"
 
+# Docker Cleanup: dangling Volumes löschen ist Opt-in (Standard: false = nur messen)
+DOCKER_PRUNE_VOLUMES="${DOCKER_PRUNE_VOLUMES:-false}"
+
+# Docker Cleanup: Freiplatz-Warnschwelle auf dem Dateisystem von /var/lib/docker.
+# Unterschreitet der freie Platz PCT Prozent ODER MB Megabyte, endet der Lauf
+# mit Exit ≠ 0 — gestaffelt über DISK_MIN_FREE_MB, das den Lauf ganz abbricht.
+DOCKER_PRUNE_WARN_FREE_PCT="${DOCKER_PRUNE_WARN_FREE_PCT:-10}"
+DOCKER_PRUNE_WARN_FREE_MB="${DOCKER_PRUNE_WARN_FREE_MB:-5120}"
+
 # Wird automatisch erkannt
 DEPLOYMENT_SYSTEM=""
 DEPLOYMENT_PATH=""
@@ -413,6 +422,16 @@ update_system() {
 # =====================================
 # Docker Cleanup
 # =====================================
+
+# Freiplatz-Schwelle: reine Prüf-Logik, ohne Docker testbar.
+# Argumente: <frei_mb> <gesamt_mb> <warn_pct> <warn_mb>
+# Rückgabe 0 = Schwelle unterschritten, der Lauf soll als nicht erfolgreich enden.
+prune_free_space_low() {
+    local free_mb=$1 size_mb=$2 warn_pct=$3 warn_mb=$4
+    local free_pct=$(( free_mb * 100 / size_mb ))
+    [[ $free_pct -lt $warn_pct || $free_mb -lt $warn_mb ]]
+}
+
 docker_cleanup() {
     phase_start
 
@@ -448,12 +467,22 @@ docker_cleanup() {
     # Build Cache
     docker builder prune -f --filter "until=${DOCKER_CLEANUP_HOURS}h" >/dev/null 2>&1 || true
     
-    # Volumes (nur dangling, keine aktiven!)
-    local dangling_volumes
-    dangling_volumes=$(docker volume ls -f "dangling=true" -q | wc -l)
-    if [[ $dangling_volumes -gt 0 ]]; then
-        log "INFO" "  Entferne ${dangling_volumes} ungenutzte Volumes..."
-        docker volume prune -f >/dev/null 2>&1 || true
+    # Volumes (nur dangling, keine aktiven!) — Löschen ist Opt-in: Coolify und
+    # Dokploy erzeugen dangling Volumes laufend, und ob eines davon noch
+    # gebraucht wird, kann dieses Skript nicht wissen. Default: nur messen.
+    local dangling_volumes vol_size
+    dangling_volumes=$(docker volume ls -f "dangling=true" -q | wc -l | tr -d ' ')
+    vol_size=$(docker system df --format '{{.Type}}|{{.Reclaimable}}' 2>/dev/null | awk -F'|' '$1 == "Local Volumes" {print $2}')
+    if [[ "$DOCKER_PRUNE_VOLUMES" == "true" ]]; then
+        if [[ $dangling_volumes -gt 0 ]]; then
+            log "INFO" "  Entferne ${dangling_volumes} ungenutzte Volumes..."
+            if ! docker volume prune -f >/dev/null 2>&1; then
+                log "WARNING" "  Volume-Prune fehlgeschlagen"
+            fi
+        fi
+    else
+        log "INFO" "  ${dangling_volumes} dangling Volumes (freigebbar: ${vol_size:-unbekannt}) — Löschen ist Opt-in"
+        log "INFO" "  Zum Aufräumen DOCKER_PRUNE_VOLUMES=true setzen (Volume-Prune beim nächsten Lauf)"
     fi
     
     # Docker Disk Usage Summary
@@ -465,8 +494,23 @@ docker_cleanup() {
             log "INFO" "    $line"
         done
     fi
-    
+
+    # Freiplatz auf dem Dateisystem von /var/lib/docker — der EINZIGE Grund,
+    # aus dem dieser Schritt den Lauf als nicht erfolgreich meldet. Die Anzahl
+    # dangling Volumes eskaliert bewusst nicht: ihr Wachstum ist mit dem
+    # Opt-in-Default beabsichtigt, eine Bestandsschwelle wäre Dauerrauschen.
+    local cleanup_rc=0 fs_line fs_size_mb fs_free_mb
+    fs_line=$(df -BM /var/lib/docker 2>/dev/null | awk 'NR==2 {gsub(/M/,""); print $2, $4}')
+    fs_size_mb=${fs_line%% *}
+    fs_free_mb=${fs_line##* }
+    if [[ "$fs_size_mb" =~ ^[0-9]+$ && "$fs_free_mb" =~ ^[0-9]+$ && $fs_size_mb -gt 0 ]] \
+        && prune_free_space_low "$fs_free_mb" "$fs_size_mb" "$DOCKER_PRUNE_WARN_FREE_PCT" "$DOCKER_PRUNE_WARN_FREE_MB"; then
+        log "WARNING" "  Nur ${fs_free_mb}MB frei auf dem Docker-Dateisystem (Schwelle: ${DOCKER_PRUNE_WARN_FREE_PCT}% oder ${DOCKER_PRUNE_WARN_FREE_MB}MB)"
+        cleanup_rc=1
+    fi
+
     phase_end "Docker Cleanup"
+    return $cleanup_rc
 }
 
 # =====================================
