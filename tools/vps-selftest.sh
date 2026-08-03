@@ -71,6 +71,26 @@ probe() {
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Ordnet die Ausgabe von "systemctl is-enabled" einer von fuenf Klassen zu.
+# Grundregel: Was nicht ausdruecklich als Aktivierungspfad dokumentiert ist,
+# gilt als "unknown" — niemals als sicher.
+#
+#   enabled   echter Boot-Aktivierungspfad (enabled, enabled-runtime)
+#   masked    Unit ist blockiert und kann nicht starten (masked, masked-runtime)
+#   indirect  laeuft nur, wenn eine andere Unit sie einzieht
+#             (static, indirect, alias, generated, transient)
+#   disabled  ausdruecklich nicht aktiviert
+#   unknown   not-found, leer, Fehlertext, alles Uebrige
+classify_unit_state() {
+    case "$1" in
+        enabled|enabled-runtime)                    printf 'enabled'  ;;
+        masked|masked-runtime)                      printf 'masked'   ;;
+        static|indirect|alias|generated|transient)  printf 'indirect' ;;
+        disabled)                                   printf 'disabled' ;;
+        *)                                          printf 'unknown'  ;;
+    esac
+}
+
 # ---------------------------------------------------------------------------
 # 0. Kontext
 # ---------------------------------------------------------------------------
@@ -255,25 +275,49 @@ ssh_report() {
 
     blank
     printf '  Bewertung der Boot-Persistenz:\n'
-    local svc_en sock_en
-    svc_en=$(systemctl is-enabled ssh.service 2>/dev/null || printf 'unknown')
-    sock_en=$(systemctl is-enabled ssh.socket 2>/dev/null || printf 'unknown')
+    # WICHTIG: Beide Zustaende ueber probe() einlesen. "systemctl is-enabled"
+    # gibt bei masked/static/disabled einen GUELTIGEN Zustand auf stdout aus UND
+    # endet mit Exit 1. Ein "|| printf unknown" wuerde deshalb ZUSAETZLICH
+    # feuern und den Wert zu "masked\nunknown" verfaelschen — dann greift keine
+    # der Masked-Pruefungen mehr. probe() ignoriert den Exit-Code bewusst.
+    local svc_en sock_en svc_cls sock_cls
+    svc_en=$(probe 'unknown' systemctl is-enabled ssh.service)
+    sock_en=$(probe 'unknown' systemctl is-enabled ssh.socket)
+    svc_cls=$(classify_unit_state "$svc_en")
+    sock_cls=$(classify_unit_state "$sock_en")
+    item "  ssh.service is-enabled:" "$svc_en (Klasse: $svc_cls)"
+    item "  ssh.socket  is-enabled:" "$sock_en (Klasse: $sock_cls)"
 
-    if [[ "$svc_en" == "masked" ]]; then
-        note "WARNUNG: ssh.service ist MASKED"
-    fi
-    if [[ "$sock_en" == "enabled" && "$svc_en" == "masked" ]]; then
+    # EIN Entscheidungsbaum, sich gegenseitig ausschliessende Zweige, erste
+    # zutreffende Bedingung gewinnt. Frueher standen hier drei unabhaengige
+    # if-Bloecke: bei socket=enabled + service=masked erschien erst "GEFAHR"
+    # und unmittelbar danach "Boot-Persistenz plausibel" — widerspruechlich.
+    if [[ "$svc_cls" == "masked" && "$sock_cls" == "masked" ]]; then
+        note "BLOCKER: ssh.service UND ssh.socket sind MASKED."
+        note "Es existiert kein Aktivierungspfad. Nach dem Reboot kein SSH."
+    elif [[ "$svc_cls" == "masked" && "$sock_cls" == "enabled" ]]; then
         note "GEFAHR: Socket-Aktivierung enabled, aber ssh.service masked."
         note "Der Dienst kann nach dem Reboot nicht aktiviert werden."
-    fi
-    if [[ "$svc_en" == "enabled" || "$sock_en" == "enabled" ]]; then
+        note "Boot-Persistenz ist NICHT gegeben — vor dem naechsten Reboot beheben."
+    elif [[ "$svc_cls" == "masked" ]]; then
+        note "BLOCKER: ssh.service ist MASKED (ssh.socket=$sock_en)."
+        note "Kein verlaesslicher Aktivierungspfad erkennbar."
+    elif [[ "$svc_cls" == "enabled" || "$sock_cls" == "enabled" ]]; then
         note "Mindestens ein Aktivierungspfad ist enabled — Boot-Persistenz plausibel."
-    elif [[ "$svc_en" == "static" || "$sock_en" == "static" ]]; then
-        note "Nur 'static' gefunden. static bedeutet NICHT enabled — die Unit muss"
-        note "von einer anderen Unit eingezogen werden. Genau dieser Fall wird vom"
-        note "aktuellen Guard fälschlich als sicher akzeptiert."
+        if [[ "$sock_cls" == "masked" ]]; then
+            note "Hinweis: ssh.socket ist masked, der Pfad laeuft ueber ssh.service."
+        fi
+    elif [[ "$svc_cls" == "indirect" || "$sock_cls" == "indirect" ]]; then
+        note "Nur '$svc_en'/'$sock_en' gefunden. static/indirect/alias bedeutet NICHT"
+        note "enabled — die Unit muss von einer anderen Unit eingezogen werden."
+        note "Genau dieser Fall wird vom aktuellen Guard faelschlich als sicher akzeptiert."
+    elif [[ "$sock_cls" == "masked" ]]; then
+        note "BLOCKER: ssh.socket ist MASKED und ssh.service ist nicht enabled (=$svc_en)."
+    elif [[ "$svc_cls" == "disabled" && "$sock_cls" == "disabled" ]]; then
+        note "BLOCKER: ssh.service und ssh.socket sind beide disabled."
+        note "Nach dem Reboot ist kein SSH-Zugang zu erwarten."
     else
-        note "Kein enabled/static Aktivierungspfad erkennbar — genau prüfen!"
+        note "Kein Aktivierungspfad erkennbar (service=$svc_en, socket=$sock_en) — genau pruefen!"
     fi
 
     blank
@@ -287,7 +331,7 @@ ssh_report() {
     else
         item "  sshd -T port:" "sshd nicht im PATH"
     fi
-    if [[ "$sock_en" == "enabled" ]]; then
+    if [[ "$sock_cls" == "enabled" ]]; then
         note "Bei aktiver Socket-Aktivierung ist der Port aus sshd_config wirkungslos."
         note "Maßgeblich ist ListenStream. Abweichung ist hier KEIN Fehler."
     fi
@@ -544,7 +588,9 @@ fleet_summary() {
     printf 'OS=%s\n'                  "$(. /etc/os-release 2>/dev/null && printf '%s' "${VERSION_ID:-?}")"
 
     printf 'VPS_UPDATE_INSTALLED=%s\n' "$([[ -x "$bin" ]] && printf yes || printf no)"
-    printf 'VPS_UPDATE_LINES=%s\n'     "$([[ -r "$bin" ]] && wc -l < "$bin" | tr -d ' ' || printf 0)"
+    # Nicht lesbar heisst NICHT "0 Zeilen" — sonst sieht ein unlesbares Skript
+    # im Flottenvergleich wie eine leere Datei aus.
+    printf 'VPS_UPDATE_LINES=%s\n'     "$([[ -r "$bin" ]] && wc -l < "$bin" | tr -d ' ' || printf unknown)"
     printf 'VPS_STATUS_INSTALLED=%s\n' "$([[ -x /usr/local/bin/vps-status ]] && printf yes || printf no)"
     printf 'BACKUP_FUNCTIONS=%s\n'     "$([[ -e "$lib/backup-functions.sh" ]] && printf present || printf missing)"
 
@@ -570,33 +616,68 @@ fleet_summary() {
     printf 'SSH_SOCKET_LISTEN=%s\n'   "$(probe 'n/a' systemctl show ssh.socket -p ListenStream --value)"
 
     # Docker / Swarm
-    local swarm="none" global=0 zero=0 dangling=0
+    #
+    # GRUNDREGEL dieses Blocks: Ein Wert, der nicht beobachtet wurde, ist
+    # "unknown" — niemals 0 und niemals "none". Dieser Block wird ueber sechs
+    # Server hinweg verglichen; "0 dangling Volumes" und "nicht gemessen" sind
+    # voellig verschiedene Aussagen, und nur die erste rechtfertigt eine
+    # Entscheidung. Deshalb wird VOR dem Zaehlen der Status des jeweiligen
+    # Kommandos geprueft, nicht nur dessen (leere) Ausgabe.
+    local swarm="unknown" global="unknown" zero="unknown" dangling="unknown"
     if have docker && docker info >/dev/null 2>&1; then
-        local st ctrl
-        st=$(docker info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null)
-        ctrl=$(docker info --format '{{.Swarm.ControlAvailable}}' 2>/dev/null)
-        if [[ "$st" == "active" && "$ctrl" == "true" ]]; then
-            swarm="manager"
-        elif [[ "$st" == "active" ]]; then
-            swarm="worker"
+        local st ctrl st_rc ctrl_rc
+        st=$(docker info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null);   st_rc=$?
+        ctrl=$(docker info --format '{{.Swarm.ControlAvailable}}' 2>/dev/null); ctrl_rc=$?
+        if [[ $st_rc -eq 0 && $ctrl_rc -eq 0 && -n "$st" && -n "$ctrl" ]]; then
+            if [[ "$st" == "active" && "$ctrl" == "true" ]]; then
+                swarm="manager"
+            elif [[ "$st" == "active" ]]; then
+                swarm="worker"
+            else
+                swarm="none"
+            fi
         fi
-        if [[ "$ctrl" == "true" ]]; then
-            global=$(docker service ls --format '{{.Mode}}' 2>/dev/null | grep -c '^global$')
-            zero=$(docker service ls --format '{{.Replicas}}' 2>/dev/null | grep -c '^0/')
+        # Manager-only-Metriken. Auf einem Worker (oder ohne Swarm) sind sie
+        # NICHT 0, sondern schlicht nicht erhebbar -> "unknown" bleibt stehen.
+        if [[ "$swarm" == "manager" ]]; then
+            local modes reps svc_rc
+            modes=$(docker service ls --format '{{.Mode}}' 2>/dev/null); svc_rc=$?
+            if [[ $svc_rc -eq 0 ]]; then
+                global=$(printf '%s\n' "$modes" | grep -c '^global$')
+            fi
+            reps=$(docker service ls --format '{{.Replicas}}' 2>/dev/null); svc_rc=$?
+            if [[ $svc_rc -eq 0 ]]; then
+                zero=$(printf '%s\n' "$reps" | grep -c '^0/')
+            fi
         fi
-        dangling=$(docker volume ls -f dangling=true -q 2>/dev/null | wc -l | tr -d ' ')
+        local vols vol_rc
+        vols=$(docker volume ls -f dangling=true -q 2>/dev/null); vol_rc=$?
+        if [[ $vol_rc -eq 0 ]]; then
+            # printf '%s\n' "" ergibt eine LEERE Zeile; '.' trifft sie nicht.
+            # Leere Ausgabe zaehlt damit korrekt als 0, nicht als 1.
+            dangling=$(printf '%s\n' "$vols" | grep -c '.')
+        fi
     fi
     printf 'SWARM=%s\n'             "$swarm"
-    printf 'GLOBAL_SERVICES=%s\n'   "${global:-0}"
-    printf 'SERVICES_AT_ZERO=%s\n'  "${zero:-0}"
-    printf 'DANGLING_VOLUMES=%s\n'  "${dangling:-0}"
+    printf 'GLOBAL_SERVICES=%s\n'   "$global"
+    printf 'SERVICES_AT_ZERO=%s\n'  "$zero"
+    printf 'DANGLING_VOLUMES=%s\n'  "$dangling"
 
-    # APT
-    local holds
-    holds=$(apt-mark showhold 2>/dev/null | tr '\n' ',' | sed 's/,$//')
-    printf 'APT_HOLDS=%s\n' "${holds:-none}"
+    # APT — "none" darf ausschliesslich nach einer ERFOLGREICHEN Abfrage stehen.
+    local apt_holds="unknown"
+    if have apt-mark; then
+        local holds holds_rc
+        holds=$(apt-mark showhold 2>/dev/null); holds_rc=$?
+        if [[ $holds_rc -eq 0 ]]; then
+            apt_holds=$(printf '%s' "$holds" | tr '\n' ',' | sed 's/,$//')
+            [[ -z "$apt_holds" ]] && apt_holds="none"
+        fi
+    fi
+    printf 'APT_HOLDS=%s\n' "$apt_holds"
 
-    printf 'DISK_ROOT_USE=%s\n' "$(df -h / 2>/dev/null | awk 'NR==2{print $5}')"
+    local disk_use
+    disk_use=$(df -h / 2>/dev/null | awk 'NR==2{print $5}')
+    printf 'DISK_ROOT_USE=%s\n' "${disk_use:-unknown}"
 }
 
 summary() {
