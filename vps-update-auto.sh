@@ -1058,7 +1058,12 @@ main() {
     log "INFO" "Datum: $(date)"
     log "INFO" "Server: $(hostname)"
     log "INFO" "Kernel: $(uname -r)"
-    
+
+    # Rückgabewert-Propagation: Teilschritte melden Fehler über RUN_RC,
+    # ohne unter set -e den Lauf zwischen Stoppen und Starten abzubrechen
+    local RUN_RC=0
+    local RUN_RC_STEPS=""
+
     # Voraussetzungen prüfen & System erkennen
     check_prerequisites
     
@@ -1083,9 +1088,10 @@ main() {
         exit 1
     fi
     
-    # Docker Cleanup
-    docker_cleanup
-    
+    # Docker Cleanup — niemals nackt: return ≠ 0 darf die Folgeschritte
+    # (Container-Start!) nicht abwürgen
+    docker_cleanup || { RUN_RC=$?; RUN_RC_STEPS+=" docker_cleanup"; }
+
     # Deployment-Stack starten
     start_deployment_stack
     
@@ -1101,16 +1107,25 @@ main() {
     # Security Check
     security_check
     
-    # Reboot prüfen
-    check_reboot_required
-    
+    # Reboot prüfen — niemals nackt (siehe docker_cleanup)
+    check_reboot_required || { RUN_RC=$?; RUN_RC_STEPS+=" check_reboot_required"; }
+
     # Zusammenfassung
     show_summary
     
-    log "SUCCESS" "========================================="
-    log "SUCCESS" "VPS Auto-Update abgeschlossen"
-    log "SUCCESS" "Gesamtdauer: $(format_duration $SECONDS)"
-    log "SUCCESS" "========================================="
+    if [[ $RUN_RC -eq 0 ]]; then
+        log "SUCCESS" "========================================="
+        log "SUCCESS" "VPS Auto-Update abgeschlossen"
+        log "SUCCESS" "Gesamtdauer: $(format_duration $SECONDS)"
+        log "SUCCESS" "========================================="
+    else
+        log "WARNING" "========================================="
+        log "WARNING" "VPS Auto-Update beendet, Teilschritt nicht erfolgreich:${RUN_RC_STEPS}"
+        log "WARNING" "Gesamtdauer: $(format_duration $SECONDS)"
+        log "WARNING" "========================================="
+    fi
+
+    return $RUN_RC
 }
 
 # Skript ausführen
