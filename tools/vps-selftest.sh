@@ -32,7 +32,7 @@ set -uo pipefail
 #      Berechtigung". v1.1 meldete FLAVOR=no-docker, obwohl docker.service
 #      lief und nur der Zugriff ohne sudo fehlte — irreführend im Vergleich
 #      über mehrere Hosts.
-readonly SELFTEST_VERSION="1.2"
+readonly SELFTEST_VERSION="1.3"
 
 # ---------------------------------------------------------------------------
 # Ausgabe-Helfer
@@ -674,6 +674,41 @@ fleet_summary() {
         fi
     fi
     printf 'APT_HOLDS=%s\n' "$apt_holds"
+
+    # Reboot / Kernel (A8b). REBOOT_PENDING_DAYS_MIN ist eine UNTERGRENZE:
+    # jedes weitere reboot-pflichtige Paket erneuert die mtime der Datei.
+    # "n/a" = kein Reboot ausstehend; "unknown" = mtime nicht ermittelbar
+    # (z. B. kein GNU stat) — niemals eine erfundene Zahl.
+    local reboot_req="no" pending_min="n/a"
+    if [[ -f /var/run/reboot-required ]]; then
+        reboot_req="yes"
+        pending_min="unknown"
+        local rr_mtime now_s
+        rr_mtime=$(stat -c %Y /var/run/reboot-required 2>/dev/null) || rr_mtime=""
+        now_s=$(date +%s 2>/dev/null) || now_s=""
+        if [[ "$rr_mtime" =~ ^[0-9]+$ && "$now_s" =~ ^[0-9]+$ ]]; then
+            pending_min=$(( (now_s - rr_mtime) / 86400 ))
+        fi
+    fi
+    printf 'REBOOT_REQUIRED=%s\n'         "$reboot_req"
+    printf 'REBOOT_PENDING_DAYS_MIN=%s\n' "$pending_min"
+
+    # Neuester INSTALLIERTER Kernel. sort -V ist Pflicht (ohne Versions-
+    # sortierung gewinnt 6.8.0-99 gegen 6.8.0-136); der Status-Filter hält
+    # deinstallierte Pakete heraus. RUNNING_KERNEL != NEWEST_KERNEL heißt:
+    # Reboot-Bedarf, auch wenn /var/run/reboot-required fehlt.
+    local newest_kernel="unknown"
+    if have dpkg-query; then
+        local nk
+        nk=$({ dpkg-query -W -f='${Package}\t${Status}\n' 'linux-image-[0-9]*' 2>/dev/null \
+            | awk -F'\t' '$2 == "install ok installed" {print $1}' \
+            | sed 's/^linux-image-//' | sort -V | tail -n 1; } || true)
+        if [[ -n "$nk" ]]; then
+            newest_kernel="$nk"
+        fi
+    fi
+    printf 'RUNNING_KERNEL=%s\n' "$(probe 'unknown' uname -r)"
+    printf 'NEWEST_KERNEL=%s\n'  "$newest_kernel"
 
     local disk_use
     disk_use=$(df -h / 2>/dev/null | awk 'NR==2{print $5}')
