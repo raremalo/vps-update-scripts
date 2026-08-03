@@ -121,7 +121,26 @@ rotate_log() {
     fi
 }
 
+# Von diesem Lauf NEU gesetzte APT-Holds (Differenz zum Vorzustand aus
+# apt-mark showhold). Der EXIT-Trap gibt genau diese Menge wieder frei;
+# vorher gehaltene Pakete bleiben unangetastet.
+APT_HOLDS_ADDED=""
+
+release_apt_holds() {
+    if [[ -n "$APT_HOLDS_ADDED" ]]; then
+        # Wortaufspaltung der Paketliste ist gewollt
+        # shellcheck disable=SC2086
+        if apt-mark unhold $APT_HOLDS_ADDED >/dev/null 2>&1; then
+            log "INFO" "APT-Holds wieder freigegeben: ${APT_HOLDS_ADDED}"
+        else
+            log "WARNING" "APT-Holds nicht freigegeben (bleiben gesetzt): ${APT_HOLDS_ADDED}"
+        fi
+        APT_HOLDS_ADDED=""
+    fi
+}
+
 cleanup() {
+    release_apt_holds
     rm -f "$LOCKFILE"
 }
 
@@ -399,8 +418,16 @@ update_system() {
         log "INFO" "  → $line"
     done
     
-    # Halte problematische Pakete zurück
+    # Halte problematische Pakete zurück — nur für die Dauer dieses Laufs.
+    # Vermerkt wird, was vorher NICHT gehalten war; der EXIT-Trap gibt genau
+    # das wieder frei. Ein vom Administrator gesetzter Hold steht im
+    # Vorzustand und bleibt damit unangetastet.
     log "INFO" "Halte problematische Pakete zurück..."
+    local holds_before pkg
+    holds_before=$(apt-mark showhold 2>/dev/null || true)
+    for pkg in snapd ubuntu-advantage-tools; do
+        grep -qx "$pkg" <<<"$holds_before" || APT_HOLDS_ADDED="${APT_HOLDS_ADDED}${APT_HOLDS_ADDED:+ }${pkg}"
+    done
     apt-mark hold snapd ubuntu-advantage-tools 2>/dev/null || true
     
     # Führe Updates durch (nur upgrade, kein dist-upgrade)
