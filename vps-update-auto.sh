@@ -1078,7 +1078,7 @@ show_final_status() {
     if [[ "$IS_SWARM" == "true" ]]; then
         docker service ls --format "table {{.Name}}\t{{.Replicas}}\t{{.Image}}" 2>/dev/null | grep -E "(dokploy|NAME)" | tee -a "$LOGFILE" || true
     fi
-    # awk statt head: `head -20` schliesst die Pipe nach 20 Zeilen, `docker ps`
+    # awk statt head: ein head mit Zeilenlimit schliesst die Pipe, `docker ps`
     # erhaelt SIGPIPE und endet mit 141. Unter `set -o pipefail` wird 141 zum
     # Status der Pipeline, `set -e` beendet daraufhin das Skript — und zwar VOR
     # security_check, check_reboot_required und show_summary.
