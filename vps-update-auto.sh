@@ -984,7 +984,17 @@ show_final_status() {
     if [[ "$IS_SWARM" == "true" ]]; then
         docker service ls --format "table {{.Name}}\t{{.Replicas}}\t{{.Image}}" 2>/dev/null | grep -E "(dokploy|NAME)" | tee -a "$LOGFILE" || true
     fi
-    docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" | head -20 | tee -a "$LOGFILE"
+    # awk statt head: `head -20` schliesst die Pipe nach 20 Zeilen, `docker ps`
+    # erhaelt SIGPIPE und endet mit 141. Unter `set -o pipefail` wird 141 zum
+    # Status der Pipeline, `set -e` beendet daraufhin das Skript — und zwar VOR
+    # security_check, check_reboot_required und show_summary.
+    # Ausgeloest ab 20 Containern (Kopfzeile + N > 20). Auf lorini (22 Container)
+    # fiel dadurch wochenlang die Reboot-Meldung aus, obwohl Kernel-Updates
+    # installiert und reboot-pflichtig waren.
+    # `|| true` waere die naheliegende Alternative, maskiert aber auch echte
+    # docker-Fehler (gemessen: Exit 3 -> 0). awk liest die Eingabe vollstaendig,
+    # erzeugt kein SIGPIPE und laesst echte Fehler weiterhin durch.
+    docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" | awk 'NR<=20' | tee -a "$LOGFILE"
 }
 
 # =====================================
