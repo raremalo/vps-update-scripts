@@ -415,7 +415,17 @@ update_system() {
 # =====================================
 docker_cleanup() {
     phase_start
-    
+
+    # Konfigurationsfehler: WARNING und überspringen, kein failed-Lauf
+    if [[ ! "$DOCKER_CLEANUP_DAYS" =~ ^[1-9][0-9]*$ ]]; then
+        log "WARNING" "DOCKER_CLEANUP_DAYS='${DOCKER_CLEANUP_DAYS}' ist keine positive Zahl - Docker Cleanup übersprungen"
+        phase_end "Docker Cleanup (übersprungen)"
+        return 0
+    fi
+
+    # Docker-Filter erwarten Stunden, die Konfiguration ist in Tagen
+    local DOCKER_CLEANUP_HOURS=$(( DOCKER_CLEANUP_DAYS * 24 ))
+
     log "INFO" "Räume Docker auf (Images älter als ${DOCKER_CLEANUP_DAYS} Tage)..."
     
     # Dangling Images (ungetaggt)
@@ -428,7 +438,7 @@ docker_cleanup() {
     
     # Alte Images
     local reclaimed
-    reclaimed=$(docker image prune -a --filter "until=${DOCKER_CLEANUP_DAYS}h" -f 2>/dev/null | grep "Total reclaimed space" || true)
+    reclaimed=$(docker image prune -a --filter "until=${DOCKER_CLEANUP_HOURS}h" -f 2>/dev/null | grep "Total reclaimed space" || true)
     if [[ -n "$reclaimed" ]]; then
         log "SUCCESS" "  $reclaimed"
     else
@@ -436,7 +446,7 @@ docker_cleanup() {
     fi
     
     # Build Cache
-    docker builder prune -f --filter "until=${DOCKER_CLEANUP_DAYS}h" >/dev/null 2>&1 || true
+    docker builder prune -f --filter "until=${DOCKER_CLEANUP_HOURS}h" >/dev/null 2>&1 || true
     
     # Volumes (nur dangling, keine aktiven!)
     local dangling_volumes
