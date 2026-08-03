@@ -123,10 +123,86 @@ if [[ -n "$regressions" ]]; then
     printf '\n  NEUE FINDINGS (Regression):\n%s\n' "$regressions"
 fi
 
+# --- 3. Read-only-Zusicherung ---------------------------------------------
+#
+# Skripte, die im Kopf "# LINT: read-only" tragen, dürfen keine mutierenden
+# Kommandos enthalten. Geprüft werden AUSFÜHRBARE ZEILEN, nicht der Volltext:
+# Kommentare und String-Literale werden vorher entfernt.
+#
+# Grund: Eine Volltext-Suche zählt Prosa mit ("... würde 'docker volume prune'
+# löschen") und ist durch Umformulieren umgehbar — sie prüft die Wortwahl,
+# nicht das Verhalten.
+
+# Nur echte Zustandsänderungen. Bewusst NICHT enthalten: lesende Unterkommandos
+# wie `docker ps/info/inspect`, `systemctl show/is-*/list-*`, `apt-mark showhold`.
+readonly MUTATING='docker[[:space:]]+(start|stop|rm|kill|update|prune|create|run|exec|load|import|volume[[:space:]]+(rm|prune|create))|docker[[:space:]]+(service|stack|network|image|system|builder)[[:space:]]+(rm|prune|scale|update|create|deploy)|systemctl[[:space:]]+(start|stop|enable|disable|mask|unmask|restart|reload|kill|set-|reset-failed|daemon-reload)|apt-get|apt-mark[[:space:]]+(hold|unhold|auto|manual)|(^|[[:space:]])(rm|mkdir|rmdir|touch|chmod|chown|ln|mv|cp|dd|truncate|install)[[:space:]]|(^|[[:space:]])(reboot|shutdown|halt|poweroff)([[:space:]]|$)|>[[:space:]]*[^&[:space:]]'
+
+# Reduziert eine Datei auf das, was tatsächlich ausgeführt wird:
+#   1. Heredoc-Rümpfe entfernen — sie sind Daten, kein Code. Der Installer
+#      erzeugt damit systemd-Units, der Selbsttest seinen Hilfetext.
+#   2. einfache und doppelte Anführungszeichen samt Inhalt entfernen
+#      (Prosa in Log- und Hilfetexten soll nicht mitzählen)
+#   3. Kommentare entfernen
+#   4. harmlose Umleitungen entfernen, BEVOR auf ">" geprüft wird —
+#      `2>/dev/null`, `>/dev/null`, `2>&1` sind keine Schreibzugriffe und
+#      stehen in nahezu jeder Zeile
+strip_to_executable() {
+    awk '
+        # Heredoc-Zeilen werden durch Leerzeilen ERSETZT, nicht entfernt —
+        # sonst verschieben sich alle folgenden Zeilennummern und die
+        # Fundstellenmeldung zeigt auf die falsche Stelle.
+        inhd {
+            if ($0 ~ "^[ \t]*" term "[ \t]*$") inhd = 0
+            print ""
+            next
+        }
+        {
+            line = $0
+            if (match(line, /<<-?[ \t]*[\047\042]?[A-Za-z_][A-Za-z0-9_]*[\047\042]?/)) {
+                t = substr(line, RSTART, RLENGTH)
+                sub(/^<<-?[ \t]*/, "", t)
+                gsub(/[\047\042]/, "", t)
+                term = t
+                inhd = 1
+                sub(/<<.*$/, "", line)
+            }
+            print line
+        }
+    ' "$1" \
+    | sed -e "s/'[^']*'//g" \
+          -e 's/"[^"]*"//g' \
+          -e 's/#.*$//' \
+          -e 's/[0-9]*>[[:space:]]*\/dev\/null//g' \
+          -e 's/[0-9]*>&[0-9-]//g'
+}
+
+printf '\n=== Read-only-Zusicherung ===\n'
+readonly_violations=0
+readonly_checked=0
+while IFS= read -r f; do
+    [[ -f "$f" ]] || continue
+    grep -q '^# LINT: read-only' "$f" 2>/dev/null || continue
+    readonly_checked=$((readonly_checked + 1))
+    hits=$(strip_to_executable "$f" | grep -nE "$MUTATING" || true)
+    if [[ -n "$hits" ]]; then
+        printf '  VERLETZUNG  %s\n' "$f"
+        printf '%s\n' "$hits" | sed 's/^/              /'
+        readonly_violations=$((readonly_violations + 1))
+    else
+        printf '  OK  %s — keine mutierenden Kommandos in ausführbaren Zeilen\n' "$f"
+    fi
+done <<< "$FILES"
+[[ $readonly_checked -eq 0 ]] && printf '  (kein Skript mit "# LINT: read-only" markiert)\n'
+
 # --- Ergebnis --------------------------------------------------------------
 
 printf '\n=== Ergebnis ===\n'
 rc=0
+if [[ $readonly_violations -gt 0 ]]; then
+    printf '  FEHLGESCHLAGEN: %s Skript(e) verletzen ihre Read-only-Zusicherung\n' \
+        "$readonly_violations"
+    rc=1
+fi
 if [[ $syntax_errors -gt 0 ]]; then
     printf '  FEHLGESCHLAGEN: %s Datei(en) mit Syntaxfehler\n' "$syntax_errors"
     rc=1
