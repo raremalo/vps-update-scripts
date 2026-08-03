@@ -3,6 +3,11 @@
 *.txt
 *.lock
 
+# Ausnahme: Die shellcheck-Baseline ist gepinnter Referenzwert, kein Log.
+# tools/lint.sh vergleicht jeden Lauf dagegen; ohne getrackte Datei gäbe es
+# keinen Regressionsschutz.
+!tools/shellcheck-baseline.txt
+
 # Kilo Code configuration
 .kilocode/
 
