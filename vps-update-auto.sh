@@ -22,6 +22,11 @@ LOG_MAX_SIZE="${LOG_MAX_SIZE:-1048576}"
 # Reboot: Countdown in Sekunden (Standard: 60)
 REBOOT_DELAY="${REBOOT_DELAY:-60}"
 
+# Reboot: Tage, ab denen ein ausstehender Reboot den Lauf als nicht
+# erfolgreich meldet (gleiche Schwelle wie in vps-status). Rebootet wird
+# dadurch NICHT — das Terminal-Gate bleibt unangetastet.
+REBOOT_OVERDUE_DAYS="${REBOOT_OVERDUE_DAYS:-7}"
+
 # Disk: Mindestfreier Speicher in MB (Standard: 500MB)
 DISK_MIN_FREE_MB="${DISK_MIN_FREE_MB:-500}"
 
@@ -989,6 +994,14 @@ check_reboot_required() {
         else
             log "WARNING" "Automatischer Reboot übersprungen (kein Terminal)"
             log "WARNING" "Bitte manuell neustarten: reboot"
+            # Überfälligkeit eskaliert über den Rückgabewert: main() fängt ihn
+            # per RUN_RC ab (A3-0), alle Folgeschritte laufen weiter, die Unit
+            # geht auf failed. Portables find wie in vps-status — die
+            # Entscheidung hängt nicht an GNU stat.
+            if [[ -n "$(find /var/run/reboot-required -maxdepth 0 -mtime +"$REBOOT_OVERDUE_DAYS" -print 2>/dev/null)" ]]; then
+                log "WARNING" "Reboot steht seit mehr als ${REBOOT_OVERDUE_DAYS} Tagen aus — Lauf wird als nicht erfolgreich gemeldet"
+                return 1
+            fi
         fi
     else
         log "INFO" "Kein Neustart erforderlich"
