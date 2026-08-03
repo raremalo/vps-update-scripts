@@ -131,12 +131,18 @@ start_coolify() {
 
 verify_coolify() {
     log "Verifiziere Coolify-Services..."
-    
-    [[ $(docker ps | grep -c "coolify-db") -gt 0 ]] && log "✓ Coolify Database läuft" || log "✗ WARNING: Coolify Database läuft nicht!"
-    [[ $(docker ps | grep -c "coolify-redis") -gt 0 ]] && log "✓ Coolify Redis läuft" || log "✗ WARNING: Coolify Redis läuft nicht!"
-    [[ $(docker ps | grep -c "coolify-realtime") -gt 0 ]] && log "✓ Coolify Soketi läuft" || log "✗ WARNING: Coolify Soketi läuft nicht!"
-    [[ $(docker ps | grep "^coolify" | grep -vc "coolify-") -gt 0 ]] && log "✓ Coolify Hauptservice läuft" || log "✗ WARNING: Coolify Hauptservice läuft nicht!"
-    [[ $(docker ps | grep -c "coolify-proxy") -gt 0 ]] && log "✓ Coolify Proxy läuft" || log "✗ WARNING: Coolify Proxy läuft nicht!"
+
+    # Ein Docker-Aufruf, Vergleich gegen die NAMES-Spalte. Herestring statt
+    # Pipe: grep -q beendet die Pipe nach dem ersten Treffer, und unter
+    # set -o pipefail würde der SIGPIPE des Listings den Check falsch kippen.
+    local names
+    names=$(docker ps --format '{{.Names}}' 2>/dev/null || true)
+
+    grep -qx "coolify-db" <<<"$names" && log "✓ Coolify Database läuft" || log "✗ WARNING: Coolify Database läuft nicht!"
+    grep -qx "coolify-redis" <<<"$names" && log "✓ Coolify Redis läuft" || log "✗ WARNING: Coolify Redis läuft nicht!"
+    grep -qx "coolify-realtime" <<<"$names" && log "✓ Coolify Soketi läuft" || log "✗ WARNING: Coolify Soketi läuft nicht!"
+    grep -qx "coolify" <<<"$names" && log "✓ Coolify Hauptservice läuft" || log "✗ WARNING: Coolify Hauptservice läuft nicht!"
+    grep -qx "coolify-proxy" <<<"$names" && log "✓ Coolify Proxy läuft" || log "✗ WARNING: Coolify Proxy läuft nicht!"
 }
 
 # =====================================
@@ -165,11 +171,17 @@ start_dokploy() {
 
 verify_dokploy() {
     log "Verifiziere Dokploy-Services..."
-    
-    [[ $(docker ps | grep -c "dokploy-postgres") -gt 0 ]] && log "✓ Dokploy PostgreSQL läuft" || log "✗ WARNING: Dokploy PostgreSQL läuft nicht!"
-    [[ $(docker ps | grep -c "dokploy-redis") -gt 0 ]] && log "✓ Dokploy Redis läuft" || log "✗ WARNING: Dokploy Redis läuft nicht!"
-    [[ $(docker ps | grep -c "dokploy/dokploy") -gt 0 ]] && log "✓ Dokploy Hauptservice läuft" || log "✗ WARNING: Dokploy Hauptservice läuft nicht!"
-    [[ $(docker ps | grep -c "dokploy-traefik") -gt 0 ]] && log "✓ Traefik Proxy läuft" || log "✗ WARNING: Traefik Proxy läuft nicht!"
+
+    # Auf den Swarm-Hosts heißen die Task-Container dokploy.1.<taskid>,
+    # dokploy-postgres.1.<taskid> usw. — deshalb Name exakt ODER bis zum
+    # ersten Punkt verankert, statt grep -qx. Herestring: siehe verify_coolify.
+    local names
+    names=$(docker ps --format '{{.Names}}' 2>/dev/null || true)
+
+    grep -qE '^dokploy-postgres(\.|$)' <<<"$names" && log "✓ Dokploy PostgreSQL läuft" || log "✗ WARNING: Dokploy PostgreSQL läuft nicht!"
+    grep -qE '^dokploy-redis(\.|$)' <<<"$names" && log "✓ Dokploy Redis läuft" || log "✗ WARNING: Dokploy Redis läuft nicht!"
+    grep -qE '^dokploy(\.|$)' <<<"$names" && log "✓ Dokploy Hauptservice läuft" || log "✗ WARNING: Dokploy Hauptservice läuft nicht!"
+    grep -qE '^dokploy-traefik(\.|$)' <<<"$names" && log "✓ Traefik Proxy läuft" || log "✗ WARNING: Traefik Proxy läuft nicht!"
 }
 
 # =====================================
