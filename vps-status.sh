@@ -7,7 +7,10 @@ echo -e "${BLUE}Host:$(hostname) | Kernel:$(uname -r) | Uptime:$(uptime -p)${NC}
 
 # Updates
 UPG_TOTAL=$(apt list --upgradable 2>/dev/null | tail -n +2 | wc -l)
-UPG_SEC=$(apt list --upgradable 2>/dev/null | grep -ci security)
+# grep -c liefert bei null Treffern Exit 1 — unter set -euo pipefail stürbe
+# das Skript genau dann, wenn KEINE Security-Updates ausstehen
+UPG_SEC=$(apt list --upgradable 2>/dev/null | grep -ci security || true)
+UPG_SEC=${UPG_SEC:-0}
 [[ $UPG_TOTAL -gt 0 ]] \
   && echo -e "📦 Updates: ${YELLOW}$UPG_TOTAL ($UPG_SEC Security)${NC}" \
   || echo -e "📦 Updates: ${GREEN}keine${NC}"
