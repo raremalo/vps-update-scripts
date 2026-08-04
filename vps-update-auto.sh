@@ -668,6 +668,16 @@ verify_coolify_services() {
     fi
     
     [[ "$all_ok" == true ]] && log "SUCCESS" "Coolify-Stack vollständig gestartet"
+
+    # N15: Ohne dieses return liefert die Funktion den Status des [[ ]]-Tests.
+    # Bei all_ok=false ist das 1, und weil verify_coolify_services die letzte
+    # Anweisung von start_coolify_stack ist, erbt der nackte Aufruf im
+    # case-Zweig (:592) diesen Status — unter `set -e` endet damit der GESAMTE
+    # Lauf, vor start_other_containers, Security-Check, Reboot-Pruefung und
+    # Zusammenfassung. Ein Proxy, der fuenf Sekunden laenger braucht, genuegt.
+    # Die Meldungen oben sind WARNING/ERROR: sie gehoeren ins Log, nicht in den
+    # Kontrollfluss. Belegt am 04.08. auf vmd185359 (status=1/FAILURE).
+    return 0
 }
 
 start_dokploy_stack() {
@@ -770,6 +780,11 @@ verify_dokploy_services() {
     fi
     
     [[ "$all_ok" == true ]] && log "SUCCESS" "Dokploy-Stack vollständig gestartet"
+
+    # N15, identisch zur Coolify-Variante: Auf den Swarm-Hosts setzt
+    # verify_swarm_svc all_ok=false, sobald ein Service nicht seine Sollreplicas
+    # erreicht hat — auch nur voruebergehend. Ohne return 0 beendet das den Lauf.
+    return 0
 }
 
 start_other_containers() {

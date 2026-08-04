@@ -179,10 +179,155 @@ case_ssh_guard() {
 }
 
 # ---------------------------------------------------------------------------
+# Fallgruppe stack-verify: verify_coolify_services / verify_dokploy_services (N15)
+#
+# Beide Funktionen enden mit `[[ "$all_ok" == true ]] && log ...`. Ist all_ok
+# false, wird der Status des gescheiterten Tests zum Rueckgabewert der Funktion
+# — und weil sie jeweils die letzte Anweisung ihrer start_*_stack-Funktion ist,
+# beendet der nackte Aufruf im case-Zweig unter `set -e` den GESAMTEN Lauf.
+#
+# Der Runner bildet das woertlich ab: `set -euo pipefail`, nackter Aufruf, und
+# erst danach die Marke REACHED. Bricht die Funktion ab, fehlt die Marke — das
+# ist derselbe Mechanismus, der am 04.08. auf vmd185359 status=1 erzeugte.
+# ---------------------------------------------------------------------------
+
+extract_fn() {
+    local fn="$1" src
+    src=$(awk "/^${fn}\\(\\)/,/^}/" "$TARGET")
+    [[ -n "$src" ]] || die "${fn}() nicht extrahierbar aus $TARGET"
+    printf '%s\n' "$src"
+}
+
+build_coolify_verify_runner() {
+    {
+        cat <<'HEAD'
+set -euo pipefail
+log() { local l="$1"; shift; printf 'LOG %s %s\n' "$l" "$*"; }
+docker() {
+    if [[ "$1 ${2:-}" == "ps --format" && -n "$T_PS" ]]; then
+        printf '%s\n' "$T_PS"
+    fi
+    return 0
+}
+HEAD
+        extract_fn verify_coolify_services
+        cat <<'FOOT'
+verify_coolify_services
+printf 'RC %s\n' "$?"
+printf 'REACHED\n'
+exit 0
+FOOT
+    } > "$WORKDIR/coolify-verify-runner.sh"
+}
+
+build_dokploy_verify_runner() {
+    {
+        cat <<'HEAD'
+set -euo pipefail
+log() { local l="$1"; shift; printf 'LOG %s %s\n' "$l" "$*"; }
+LOGFILE=/dev/null
+IS_SWARM=true
+DOKPLOY_SVC_POSTGRES=dokploy-postgres
+DOKPLOY_SVC_REDIS=dokploy-redis
+DOKPLOY_SVC_MAIN=dokploy
+DOKPLOY_SVC_TRAEFIK=dokploy-traefik
+docker() {
+    if [[ "$1 ${2:-}" == "service ls" && -n "$T_SVC" ]]; then
+        printf '%s\n' "$T_SVC"
+    fi
+    return 0
+}
+HEAD
+        extract_fn verify_swarm_svc
+        extract_fn verify_dokploy_services
+        cat <<'FOOT'
+verify_dokploy_services
+printf 'RC %s\n' "$?"
+printf 'REACHED\n'
+exit 0
+FOOT
+    } > "$WORKDIR/dokploy-verify-runner.sh"
+}
+
+# Argumente: name, runner, T-Variablenname, T-Wert, Soll-WARNING-Anzahl
+#            ('-' = nicht pruefen), Pflichtmuster (''), verbotenes Muster ('')
+run_stack_verify() {
+    local name="$1" runner="$2" tvar="$3" tval="$4"
+    local exp_warns="$5" req="$6" forb="$7"
+    local out warns bad=""
+    out=$(env "$tvar=$tval" bash "$WORKDIR/$runner" 2>&1)
+    warns=$(printf '%s\n' "$out" | grep -c '^LOG WARNING' || true)
+    if ! printf '%s\n' "$out" | grep -qx 'REACHED'; then
+        bad="Lauf abgebrochen — Funktion lieferte Nicht-Null (N15)"
+    elif [[ "$exp_warns" != "-" && "$warns" != "$exp_warns" ]]; then
+        bad="warnings=$warns (soll $exp_warns)"
+    elif [[ -n "$req" ]] && ! printf '%s\n' "$out" | grep -qF "$req"; then
+        bad="Pflichtmuster fehlt: $req"
+    elif [[ -n "$forb" ]] && printf '%s\n' "$out" | grep -qF "$forb"; then
+        bad="verbotenes Muster gefunden: $forb"
+    fi
+    if [[ -n "$bad" ]]; then
+        fail "$name" "$bad"
+        printf '%s\n' "$out" | sed 's/^/         | /'
+    else
+        ok "$name"
+    fi
+}
+
+case_stack_verify() {
+    printf '=== Fallgruppe stack-verify gegen: %s ===\n' "$TARGET"
+    build_coolify_verify_runner
+    build_dokploy_verify_runner
+    local NL
+    NL=$'\n'
+
+    local coolify_alle
+    coolify_alle="coolify-db${NL}coolify-redis${NL}coolify-realtime${NL}coolify${NL}coolify-proxy"
+
+    # Sollzustand: alle fuenf oben -> Erfolgsmeldung, keine WARNING
+    run_stack_verify "coolify-alle-oben" coolify-verify-runner.sh T_PS \
+        "$coolify_alle" 0 "Coolify-Stack vollständig gestartet" ""
+
+    # Der reale Fall vom 04.08.: Proxy braucht laenger als die 5 s aus
+    # start_coolify_stack (:623). Er DARF den Lauf nicht beenden.
+    run_stack_verify "coolify-proxy-verspaetet" coolify-verify-runner.sh T_PS \
+        "coolify-db${NL}coolify-redis${NL}coolify-realtime${NL}coolify" \
+        1 "Coolify Proxy läuft nicht" "vollständig gestartet"
+
+    # Echter Ausfall des Hauptservice: ERROR im Log, trotzdem kein Abbruch
+    run_stack_verify "coolify-hauptservice-aus" coolify-verify-runner.sh T_PS \
+        "coolify-db${NL}coolify-redis${NL}coolify-realtime${NL}coolify-proxy" \
+        0 "Coolify Hauptservice läuft nicht" "vollständig gestartet"
+
+    # Totalausfall — der Extremfall darf ebenfalls nur protokollieren
+    run_stack_verify "coolify-nichts-oben" coolify-verify-runner.sh T_PS \
+        "" - "" "vollständig gestartet"
+
+    # Dokploy/Swarm: dieselbe Mechanik ueber verify_swarm_svc
+    local dokploy_alle
+    dokploy_alle="dokploy-postgres 1/1${NL}dokploy-redis 1/1${NL}dokploy 1/1${NL}dokploy-traefik 1/1"
+
+    run_stack_verify "dokploy-alle-oben" dokploy-verify-runner.sh T_SVC \
+        "$dokploy_alle" 0 "Dokploy-Stack vollständig gestartet" ""
+
+    # Ein Service noch bei 0/1 — der haeufige Fall Sekunden nach dem Scale-up
+    run_stack_verify "dokploy-main-hochfahrend" dokploy-verify-runner.sh T_SVC \
+        "dokploy-postgres 1/1${NL}dokploy-redis 1/1${NL}dokploy 0/1${NL}dokploy-traefik 1/1" \
+        1 "nicht vollständig (0/1)" "Dokploy-Stack vollständig gestartet"
+
+    # Service noch gar nicht gelistet
+    run_stack_verify "dokploy-svc-fehlt" dokploy-verify-runner.sh T_SVC \
+        "dokploy-postgres 1/1${NL}dokploy-redis 1/1${NL}dokploy-traefik 1/1" \
+        1 "nicht gefunden" "Dokploy-Stack vollständig gestartet"
+}
+
+# ---------------------------------------------------------------------------
 
 case "$CASE_FILTER" in
-    "" | ssh-guard) case_ssh_guard ;;
-    *) die "unbekannte Fallgruppe: $CASE_FILTER (vorhanden: ssh-guard)" ;;
+    "") case_ssh_guard; printf '\n'; case_stack_verify ;;
+    ssh-guard) case_ssh_guard ;;
+    stack-verify) case_stack_verify ;;
+    *) die "unbekannte Fallgruppe: $CASE_FILTER (vorhanden: ssh-guard, stack-verify)" ;;
 esac
 
 printf '\nErgebnis: %s gruen, %s rot\n' "$PASS" "$FAIL"
