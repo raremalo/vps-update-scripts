@@ -1263,5 +1263,18 @@ main() {
     return $RUN_RC
 }
 
+# --check-ssh-only (B3): nur der SSH-Pre-Flight — die einzige Möglichkeit,
+# die Guard-Logik gegen den echten Systemzustand zu prüfen, ohne einen
+# Neustart zu riskieren. Der Zweig MUSS nach allen Funktionsdefinitionen
+# stehen (sonst Exit 127) und meldet als Erstes den EXIT-Trap ab: cleanup()
+# löschte sonst das Lockfile eines parallel laufenden Updates (Lock-Falle;
+# der vollständige Sperr-Fix über alle Dateien bleibt Schritt C3a).
+# Nicht ganz read-only: log() schreibt ins eigene Logfile.
+if [[ "${1:-}" == "--check-ssh-only" ]]; then
+    trap - EXIT
+    verify_ssh_before_reboot
+    exit
+fi
+
 # Skript ausführen
 main "$@"
