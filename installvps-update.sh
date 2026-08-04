@@ -68,11 +68,22 @@ if [[ -f "$SCRIPT_DIR/vps-update-auto.sh" ]]; then
     # Symlink für Kompatibilität (vps-update.sh/vps-update-with-backup.sh referenzieren diesen Pfad)
     ln -sf "$LIB_DIR/ensure-docker-autostart-auto.sh" "$LIB_DIR/ensure-docker-autostart.sh"
     log "  → Symlink: ensure-docker-autostart.sh → ensure-docker-autostart-auto.sh" "$GREEN"
-    
+
+    # B1: Die Unit erwartet ExecStart unter /usr/local/bin — der Installer hat
+    # dorthin nie installiert (203/EXEC auf allen sechs Hosts, von Hand
+    # entschärft). Additiv per Symlink, die Unit-Datei bleibt unverändert.
+    ln -sf "$LIB_DIR/ensure-docker-autostart-auto.sh" "$BIN_DIR/ensure-docker-autostart-auto.sh"
+    log "  → Symlink: $BIN_DIR/ensure-docker-autostart-auto.sh → $LIB_DIR/" "$GREEN"
+
     # Systemd Service
     if [[ -f "$SCRIPT_DIR/docker-autostart-auto.service" ]]; then
         log "→ Autostart Service" "$GREEN"
         install -Dm644 "$SCRIPT_DIR/docker-autostart-auto.service" "/etc/systemd/system/docker-autostart-auto.service"
+        # B1: eine Unit, deren ExecStart nicht auflösbar ist, wird nicht aktiviert
+        if ! test -x "$BIN_DIR/ensure-docker-autostart-auto.sh"; then
+            log "✗ $BIN_DIR/ensure-docker-autostart-auto.sh ist nicht ausführbar — Abbruch vor systemctl enable" "$RED"
+            exit 1
+        fi
         systemctl daemon-reload
         systemctl enable docker-autostart-auto.service
         log "  ✓ Service aktiviert" "$GREEN"
