@@ -547,13 +547,19 @@ docker_cleanup() {
     # dangling Volumes eskaliert bewusst nicht: ihr Wachstum ist mit dem
     # Opt-in-Default beabsichtigt, eine Bestandsschwelle wäre Dauerrauschen.
     local cleanup_rc=0 fs_line fs_size_mb fs_free_mb
-    fs_line=$(df -BM /var/lib/docker 2>/dev/null | awk 'NR==2 {gsub(/M/,""); print $2, $4}')
+    fs_line=$(df -BM /var/lib/docker 2>/dev/null | awk 'NR==2 {gsub(/M/,""); print $2, $4}') || fs_line=""
     fs_size_mb=${fs_line%% *}
     fs_free_mb=${fs_line##* }
-    if [[ "$fs_size_mb" =~ ^[0-9]+$ && "$fs_free_mb" =~ ^[0-9]+$ && $fs_size_mb -gt 0 ]] \
-        && prune_free_space_low "$fs_free_mb" "$fs_size_mb" "$DOCKER_PRUNE_WARN_FREE_PCT" "$DOCKER_PRUNE_WARN_FREE_MB"; then
-        log "WARNING" "  Nur ${fs_free_mb}MB frei auf dem Docker-Dateisystem (Schwelle: ${DOCKER_PRUNE_WARN_FREE_PCT}% oder ${DOCKER_PRUNE_WARN_FREE_MB}MB)"
-        cleanup_rc=1
+    if [[ "$fs_size_mb" =~ ^[0-9]+$ && "$fs_free_mb" =~ ^[0-9]+$ && $fs_size_mb -gt 0 ]]; then
+        if prune_free_space_low "$fs_free_mb" "$fs_size_mb" "$DOCKER_PRUNE_WARN_FREE_PCT" "$DOCKER_PRUNE_WARN_FREE_MB"; then
+            log "WARNING" "  Nur ${fs_free_mb}MB frei auf dem Docker-Dateisystem (Schwelle: ${DOCKER_PRUNE_WARN_FREE_PCT}% oder ${DOCKER_PRUNE_WARN_FREE_MB}MB)"
+            cleanup_rc=1
+        fi
+    else
+        # Messausfall ist kein Platzmangel: sichtbar machen statt still als
+        # gesund melden — aber kein rc!=0, sonst alarmiert jeder Host ohne
+        # messbares /var/lib/docker dauerhaft falsch
+        log "WARNING" "  Freiplatz auf /var/lib/docker nicht messbar (df lieferte '${fs_line}') - Schwellenprüfung übersprungen"
     fi
 
     phase_end "Docker Cleanup"
