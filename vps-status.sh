@@ -5,15 +5,22 @@ GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; BLUE='\033[0;34m'; NC
 echo -e "${GREEN}===== VPS-Status ($(date)) =====${NC}"
 echo -e "${BLUE}Host:$(hostname) | Kernel:$(uname -r) | Uptime:$(uptime -p)${NC}\n"
 
-# Updates
-UPG_TOTAL=$(apt list --upgradable 2>/dev/null | tail -n +2 | wc -l)
-# grep -c liefert bei null Treffern Exit 1 — unter set -euo pipefail stürbe
-# das Skript genau dann, wenn KEINE Security-Updates ausstehen
-UPG_SEC=$(apt list --upgradable 2>/dev/null | grep -ci security || true)
-UPG_SEC=${UPG_SEC:-0}
-[[ $UPG_TOTAL -gt 0 ]] \
-  && echo -e "📦 Updates: ${YELLOW}$UPG_TOTAL ($UPG_SEC Security)${NC}" \
-  || echo -e "📦 Updates: ${GREEN}keine${NC}"
+# Updates — beide Zähler aus EINEM Listing: ein zweiter apt-Aufruf könnte
+# scheitern und „0 Security" vortäuschen, während der Gesamtzähler stimmt.
+# Scheitert schon das Listing, wird das gemeldet statt als „keine" maskiert.
+if UPG_LIST=$(apt list --upgradable 2>/dev/null | tail -n +2); then
+  UPG_TOTAL=$(grep -c . <<<"$UPG_LIST" || true)
+  # grep -c liefert bei null Treffern Exit 1 — unter set -euo pipefail stürbe
+  # das Skript genau dann, wenn KEINE Security-Updates ausstehen
+  UPG_SEC=$(grep -ci security <<<"$UPG_LIST" || true)
+  UPG_TOTAL=${UPG_TOTAL:-0}
+  UPG_SEC=${UPG_SEC:-0}
+  [[ $UPG_TOTAL -gt 0 ]] \
+    && echo -e "📦 Updates: ${YELLOW}$UPG_TOTAL ($UPG_SEC Security)${NC}" \
+    || echo -e "📦 Updates: ${GREEN}keine${NC}"
+else
+  echo -e "📦 Updates: ${YELLOW}unbekannt — apt list fehlgeschlagen${NC}"
+fi
 
 # Reboot — steht er länger als REBOOT_OVERDUE_DAYS aus, endet vps-status mit
 # Exit 2, damit der Zustand maschinell auswertbar ist statt nur lesbar
