@@ -99,12 +99,41 @@ fi
 log "✓ Scripts installiert" "$GREEN"
 
 # --- Timer konfigurieren ---
+# B0: Der Zustandswechsel „Timer aktiv" hängt nicht mehr an einem Prompt mit
+# Default JA. Der Sollwert kommt aus VPS_ENABLE_TIMER (yes|no); ohne Wert und
+# ohne Terminal bricht der Installer ab, statt eine Annahme zu treffen.
+# „no" schreibt Service- und Timer-Datei trotzdem — der Zielzustand soll
+# vollständig sein —, aktiviert aber nichts und deaktiviert nichts Bestehendes
+# (ein Installer darf keinen Zustand abschalten, den er nicht angeschaltet hat).
 echo ""
-read -r -p "Automatische wöchentliche Updates aktivieren? [Y/n] " REPLY
-if [[ ${REPLY,,} != n* ]]; then
-    log "→ Richte Systemd-Timer ein..." "$GREEN"
-    
-    cat > /etc/systemd/system/vps-update.service <<'EOF'
+TIMER_CHOICE="${VPS_ENABLE_TIMER:-}"
+case "$TIMER_CHOICE" in
+    yes|no)
+        log "→ Timer-Sollwert aus VPS_ENABLE_TIMER: ${TIMER_CHOICE}" "$BLUE"
+        ;;
+    ?*)
+        log "Fehler: VPS_ENABLE_TIMER='${TIMER_CHOICE}' ist ungültig (erlaubt: yes|no)" "$RED"
+        exit 1
+        ;;
+    *)
+        if [[ ! -t 0 ]]; then
+            log "Fehler: kein Terminal und VPS_ENABLE_TIMER nicht gesetzt." "$RED"
+            log "Aufruf: VPS_ENABLE_TIMER=yes|no sudo -E bash installvps-update.sh" "$RED"
+            exit 1
+        fi
+        # Interaktiver Rückfall: Default ist NEIN — nur ein explizites y aktiviert
+        read -r -p "Automatische wöchentliche Updates aktivieren? [y/N] " REPLY
+        if [[ ${REPLY,,} == y* ]]; then
+            TIMER_CHOICE="yes"
+        else
+            TIMER_CHOICE="no"
+        fi
+        ;;
+esac
+
+log "→ Schreibe Systemd-Units (Service + Timer)..." "$GREEN"
+
+cat > /etc/systemd/system/vps-update.service <<'EOF'
 [Unit]
 Description=VPS Update (Auto-Detection Coolify/Dokploy)
 After=network-online.target
@@ -115,7 +144,7 @@ ExecStart=/usr/local/bin/vps-update
 StandardOutput=journal
 EOF
 
-    cat > /etc/systemd/system/vps-update.timer <<'EOF'
+cat > /etc/systemd/system/vps-update.timer <<'EOF'
 [Unit]
 Description=Wöchentliches VPS Update (Sonntag 02:00)
 
@@ -128,11 +157,14 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
-    systemctl daemon-reload
+systemctl daemon-reload
+if [[ "$TIMER_CHOICE" == "yes" ]]; then
     systemctl enable vps-update.timer
     systemctl start vps-update.timer
-    
     log "✓ Timer aktiviert (Sonntag 02:00)" "$GREEN"
+else
+    log "→ Timer NICHT aktiviert (Sollwert: no) — Dateien liegen bereit," "$YELLOW"
+    log "  eine bestehende Aktivierung bleibt unangetastet." "$YELLOW"
 fi
 
 # --- Logrotate ---
