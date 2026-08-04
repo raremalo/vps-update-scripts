@@ -32,7 +32,7 @@ set -uo pipefail
 #      Berechtigung". v1.1 meldete FLAVOR=no-docker, obwohl docker.service
 #      lief und nur der Zugriff ohne sudo fehlte — irreführend im Vergleich
 #      über mehrere Hosts.
-readonly SELFTEST_VERSION="1.3"
+readonly SELFTEST_VERSION="1.4"
 
 # ---------------------------------------------------------------------------
 # Ausgabe-Helfer
@@ -593,6 +593,16 @@ fleet_summary() {
     printf 'VPS_UPDATE_LINES=%s\n'     "$([[ -r "$bin" ]] && wc -l < "$bin" | tr -d ' ' || printf unknown)"
     printf 'VPS_STATUS_INSTALLED=%s\n' "$([[ -x /usr/local/bin/vps-status ]] && printf yes || printf no)"
     printf 'BACKUP_FUNCTIONS=%s\n'     "$([[ -e "$lib/backup-functions.sh" ]] && printf present || printf missing)"
+
+    # Ausgerollter Stand (B4): $lib/VERSION schreibt der Installer.
+    # "unknown" = Datei fehlt (Stand vor B4) oder ohne sha-Zeile — niemals
+    # ein erfundener Wert. Vergleichswert ist git rev-parse HEAD im Repo.
+    local deployed_sha="unknown" vsha
+    if [[ -r "$lib/VERSION" ]]; then
+        vsha=$(awk -F= '$1 == "sha" {print $2; exit}' "$lib/VERSION" 2>/dev/null) || vsha=""
+        [[ -n "$vsha" ]] && deployed_sha="$vsha"
+    fi
+    printf 'DEPLOYED_SHA=%s\n' "$deployed_sha"
 
     # 203/EXEC-Risiko
     local es target="" es_state="n/a"

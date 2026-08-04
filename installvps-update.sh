@@ -123,6 +123,17 @@ fi
 log "→ backup-functions.sh" "$GREEN"
 install -Dm644 "$SCRIPT_DIR/backup-functions.sh" "$LIB_DIR/backup-functions.sh"
 
+# B4: Ausgerollten Stand erkennbar machen. $BIN_DIR/vps-update ist eine
+# Kopie — ohne VERSION-Datei ließe sich der Stand nur forensisch bestimmen
+# (Zeilen zählen). Fallback, falls der Installer aus einem kopierten
+# Verzeichnis ohne Git-Kontext läuft.
+DEPLOY_SHA=$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null) || DEPLOY_SHA="unbekannt"
+{
+    printf 'sha=%s\n' "$DEPLOY_SHA"
+    printf 'installed=%s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+} > "$LIB_DIR/VERSION"
+log "→ VERSION geschrieben (sha=${DEPLOY_SHA})" "$GREEN"
+
 log "✓ Scripts installiert" "$GREEN"
 
 # --- Timer konfigurieren ---
