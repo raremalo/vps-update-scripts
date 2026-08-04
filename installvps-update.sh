@@ -101,11 +101,27 @@ else
     fi
 fi
 
-# Status-Script (optional)
-if [[ -f "$SCRIPT_DIR/vps-status.sh" ]]; then
-    log "→ vps-status" "$GREEN"
-    install -Dm755 "$SCRIPT_DIR/vps-status.sh" "$BIN_DIR/vps-status"
+# B2: vps-status ist verpflichtend. Eine fehlende Quelldatei ist ein
+# Repo-Defekt, kein Zustand, den ein Installer still hinnehmen darf —
+# genau so lief vmd185359 jahrelang ohne vps-status.
+if [[ ! -f "$SCRIPT_DIR/vps-status.sh" ]]; then
+    log "✗ vps-status.sh fehlt im Quellverzeichnis — Abbruch (Repo-Defekt)" "$RED"
+    exit 1
 fi
+log "→ vps-status" "$GREEN"
+install -Dm755 "$SCRIPT_DIR/vps-status.sh" "$BIN_DIR/vps-status"
+
+# B2: backup-functions.sh gehört zum Zielzustand — vps-update-with-backup.sh
+# erwartet sie unter $LIB_DIR und bricht ohne sie mit Exit 1 ab. Heute fehlt
+# sie auf 5 von 6 Hosts; „auf einem vorhanden, auf fünf nicht" ist kein
+# definierter Zustand. Wird die Datei in Phase C entfernt, entfällt diese
+# Zeile im selben Commit.
+if [[ ! -f "$SCRIPT_DIR/backup-functions.sh" ]]; then
+    log "✗ backup-functions.sh fehlt im Quellverzeichnis — Abbruch (Repo-Defekt)" "$RED"
+    exit 1
+fi
+log "→ backup-functions.sh" "$GREEN"
+install -Dm644 "$SCRIPT_DIR/backup-functions.sh" "$LIB_DIR/backup-functions.sh"
 
 log "✓ Scripts installiert" "$GREEN"
 
