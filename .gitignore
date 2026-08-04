@@ -18,3 +18,12 @@
 # Temporary directories
 vps/
 
+# Betriebs- und Planungsartefakte — NIEMALS in dieses Repo.
+# Dieses Repo ist oeffentlich. Die Dateien unter .omc/plans und .rpiv/artifacts
+# fuehren Hostnamen, SSH-Ports, Container-Inventare, Wartungsfenster und offene
+# Defekte zusammen; einzeln harmlos, zusammen eine Zielbeschreibung der
+# Infrastruktur. Sie liegen im privaten Repo raremalo/em-vernetzung-log
+# (.omc/ ist dessen Arbeitskopie und traegt ein eigenes .git).
+.omc/
+.rpiv/
+
