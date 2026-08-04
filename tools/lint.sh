@@ -300,7 +300,56 @@ while IFS= read -r f; do
 done <<< "$FILES"
 [[ $readonly_checked -eq 0 ]] && printf '  (kein Skript mit "# LINT: read-only" markiert)\n'
 
-# --- 4. Baseline fortschreiben (--update) ----------------------------------
+# --- 4. Terminale Testausdruecke (N15) -------------------------------------
+#
+# Endet eine Funktion mit einem Testausdruck oder einer ungeschuetzten
+# &&-Liste, wird deren Status zum Rueckgabewert der Funktion. Unter
+# `set -e` beendet ein nackter Aufruf einer solchen Funktion den GESAMTEN Lauf.
+#
+# Genau das war N15: verify_coolify_services endete mit
+#     [[ "$all_ok" == true ]] && log "SUCCESS" "..."
+# und beendete am 04.08. auf vmd185359 den Update-Lauf, weil ein Container
+# fuenf Sekunden zu spaet oben war — vor Security-Check, Reboot-Pruefung und
+# Zusammenfassung. Bestand seit 12/2025, von A1 verdeckt.
+#
+# Gewollte Praedikatsfunktionen (Rueckgabewert IST die Antwort) tragen
+# "# LINT: predicate" im Rumpf und sind ausgenommen.
+#
+# Nicht beanstandet wird die Form `A && B || C`: scheitert A, laeuft C, und
+# dessen Status wird der Rueckgabewert — die Funktion kann so nicht ungewollt
+# mit 1 enden.
+
+printf '\n=== 4. Terminale Testausdruecke (N15) ===\n'
+
+idiom_violations=0
+while IFS= read -r f; do
+    [[ -f "$f" ]] || continue
+    hits=$(awk '
+        /^[a-zA-Z_][a-zA-Z0-9_]*\(\)[[:space:]]*\{/ {
+            fn=$1; last=""; lastline=0; pred=pending; pending=0; next
+        }
+        # Marker gilt im Rumpf wie im Dokumentationskommentar darueber.
+        /# LINT: predicate/ { if (fn != "") pred=1; else pending=1; next }
+        /^\}/ {
+            if (fn != "" && pred == 0 &&
+                (last ~ /^\[\[/ || last ~ /^\[[[:space:]]/ ||
+                 (last ~ /&&/ && last !~ /\|\|/)))
+                printf "%d: %s -> %s\n", lastline, fn, last
+            fn=""; next
+        }
+        fn != "" && NF && $0 !~ /^[[:space:]]*#/ {
+            last=$0; sub(/^[[:space:]]+/, "", last); lastline=NR
+        }
+    ' "$f")
+    if [[ -n "$hits" ]]; then
+        printf '  VERLETZUNG  %s\n' "$f"
+        printf '%s\n' "$hits" | sed 's/^/              /'
+        idiom_violations=$((idiom_violations + 1))
+    fi
+done <<< "$FILES"
+[[ $idiom_violations -eq 0 ]] && printf '  OK — keine Funktion endet auf einem ungeschuetzten Testausdruck\n'
+
+# --- 5. Baseline fortschreiben (--update) ----------------------------------
 #
 # BEWUSST HIER, nicht direkt nach dem shellcheck-Lauf: --update darf erst
 # laufen, wenn Syntax- UND Read-only-Prüfung sauber sind. Früher schrieb
@@ -337,6 +386,13 @@ fi
 
 printf '\n=== Ergebnis ===\n'
 rc=0
+if [[ $idiom_violations -gt 0 ]]; then
+    printf '  FEHLGESCHLAGEN: %s Datei(en) mit terminalem Testausdruck (N15-Klasse)\n' \
+        "$idiom_violations"
+    printf '  Entweder "return 0" ergaenzen, oder — falls der Rueckgabewert gewollt ist —\n'
+    printf '  die Funktion mit "# LINT: predicate" markieren und den Aufruf absichern.\n'
+    rc=1
+fi
 if [[ $readonly_violations -gt 0 ]]; then
     printf '  FEHLGESCHLAGEN: %s Skript(e) verletzen ihre Read-only-Zusicherung\n' \
         "$readonly_violations"
