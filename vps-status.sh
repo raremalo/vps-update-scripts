@@ -25,10 +25,11 @@ fi
 RC=0
 RUNNING_KERNEL=$(uname -r)
 # Neuester installierter Kernel. sort -V ist Pflicht: ohne Versionssortierung
-# gewinnt 6.8.0-99 gegen 6.8.0-136.
-NEWEST_KERNEL=$({ dpkg-query -W -f='${Package}\t${Status}\n' 'linux-image-[0-9]*' 2>/dev/null \
+# gewinnt 6.8.0-99 gegen 6.8.0-136. Schlägt die Abfrage fehl, bleibt der Wert
+# leer und wird unten als „unbekannt" gemeldet — nicht als „nicht nötig".
+NEWEST_KERNEL=$(dpkg-query -W -f='${Package}\t${Status}\n' 'linux-image-[0-9]*' 2>/dev/null \
   | awk -F'\t' '$2 == "install ok installed" {print $1}' \
-  | sed 's/^linux-image-//' | sort -V | tail -n 1; } || true)
+  | sed 's/^linux-image-//' | sort -V | tail -n 1) || NEWEST_KERNEL=""
 
 if [[ -f /var/run/reboot-required ]]; then
   # mtime ist eine UNTERGRENZE: jedes reboot-pflichtige Paket touch-t die Datei
@@ -57,6 +58,10 @@ if [[ -f /var/run/reboot-required ]]; then
   fi
 elif [[ -n "$NEWEST_KERNEL" && "$NEWEST_KERNEL" != "$RUNNING_KERNEL" ]]; then
   echo -e "🔄 Reboot:  ${YELLOW}empfohlen${NC} — reboot-required fehlt, aber ein neuerer Kernel ist installiert"
+elif [[ -z "$NEWEST_KERNEL" ]]; then
+  # Messausfall (dpkg-query gescheitert oder kein Kernel-Paket gefunden):
+  # unbekannt melden statt fail-open grün
+  echo -e "🔄 Reboot:  ${YELLOW}unbekannt${NC} — installierte Kernel nicht ermittelbar (dpkg-query)"
 else
   echo -e "🔄 Reboot:  ${GREEN}nicht nötig${NC}"
 fi
