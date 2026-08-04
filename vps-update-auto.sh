@@ -976,28 +976,95 @@ verify_ssh_before_reboot() {
         return 1
     }
 
-    # 3. Lauscher-Check: jeder SSH-Port aktiv? (reuse ss -tlnp-Idiom :786-793)
-    local listening
-    listening=$(ss -tlnp 2>/dev/null | grep "LISTEN" | awk '{print $4}' | sed 's/.*://' | sort -un)
-    local p
+    # 3. Lauscher-Check (A5, Fassung G-β). Der alte Per-Port-Vergleich
+    # blockierte jeden Host, bei dem EIN sshd -T-Port nicht lauscht — unter
+    # Socket-Aktivierung ist aber ListenStream maßgeblich und die
+    # Port-Direktive wirkungslos (vmd202656: sshd -T meldet 22+2223, real
+    # lauscht nur 2223 → Dauerblock N2, in Rollout-0 produktiv belegt).
+    #
+    #   P_sshd   = Ports mit sshd-Prozess (ss -tlnp)
+    #   P_listen = alle lauschenden Ports
+    #   P_conf   = Ports aus sshd -T
+    #   L        = P_sshd ∪ (P_listen ∩ P_conf)
+    #
+    # BLOCKIERT nur bei leerem L — mit einer Ausnahme: lauscht systemd
+    # (pid 1) auf einem sshd -T-unbekannten Port, ist das der Allgemeinfall
+    # der Socket-Aktivierung → WARNING statt Blockade, ohne den Port als
+    # SSH zu zertifizieren (Regel 3; Fall K-3 in tools/test-logic.sh).
+    local ss_raw p_listen p_sshd l_ports p
+    ss_raw=$(ss -tlnp 2>/dev/null | grep "LISTEN" || true)
+    # Portextraktion: alles nach dem LETZTEN ':' — sonst liefern [::]:22
+    # und *:2222 Leeres. sed ist greedy, '.*:' trifft den letzten.
+    p_listen=$(printf '%s\n' "$ss_raw" | awk '{print $4}' | sed 's/.*://' | grep -E '^[0-9]+$' | sort -un || true)
+    p_sshd=$(printf '%s\n' "$ss_raw" | grep '"sshd"' | awk '{print $4}' | sed 's/.*://' | grep -E '^[0-9]+$' | sort -un || true)
+    # Ohne root fehlt die Prozessspalte von ss — Zuordnung unvollständig:
+    # sichtbar machen, aber nicht blockieren (Produktivpfad läuft als root)
+    if [[ -n "$ss_raw" ]] && ! grep -q 'users:((' <<<"$ss_raw"; then
+        log "WARNING" "Portzuordnung unvollständig (kein root) — ss -tlnp ohne Prozessnamen"
+    fi
+    l_ports=$( { printf '%s\n' "$p_sshd"
+                 grep -Fx -f <(printf '%s\n' "$ssh_ports") <<<"$p_listen" || true
+               } | grep -E '^[0-9]+$' | sort -un || true)
+
+    # Symmetrische WARNINGs — beide Richtungen, ohne Einfluss auf den
+    # Rückgabewert. Die zweite benennt auf vmd168223 die ungeklärte zweite
+    # sshd-Instanz (N9).
     for p in $ssh_ports; do
-        grep -qx "$p" <<<"$listening" || {
-            log "ERROR" "SSH-Port ${p} lauscht nicht — Reboot BLOCKIERT."
-            log "ERROR" "Reparatur: systemctl status ssh.socket ssh.service"
-            return 1
-        }
+        grep -qx "$p" <<<"$p_listen" \
+            || log "WARNING" "SSH-Port ${p} aus sshd -T lauscht nicht"
+    done
+    for p in $p_sshd; do
+        grep -qx "$p" <<<"$ssh_ports" \
+            || log "WARNING" "Port ${p} lauscht (sshd), ist sshd -T unbekannt"
     done
 
-    # 4. ssh.socket is-enabled (Boot-Persistenz), String-Dispatch + ssh.service-Fallback
+    if [[ -z "$l_ports" ]]; then
+        local systemd_ports sysd_unknown=""
+        systemd_ports=$(printf '%s\n' "$ss_raw" | grep '"systemd",pid=1,' | awk '{print $4}' | sed 's/.*://' | grep -E '^[0-9]+$' | sort -un || true)
+        for p in $systemd_ports; do
+            grep -qx "$p" <<<"$ssh_ports" || sysd_unknown="${sysd_unknown}${sysd_unknown:+ }${p}"
+        done
+        if [[ -n "$sysd_unknown" ]]; then
+            log "WARNING" "Portzuordnung abweichend: sshd -T [$(tr '\n' ' ' <<<"$ssh_ports")], systemd (pid 1) lauscht auf [${sysd_unknown}] — Socket-Aktivierung mit abweichendem ListenStream?"
+        else
+            log "ERROR" "Kein SSH-Port lauscht — Reboot BLOCKIERT. sshd -T: [$(tr '\n' ' ' <<<"$ssh_ports")] lauschend: [$(tr '\n' ' ' <<<"$p_listen")]"
+            log "ERROR" "Reparatur: systemctl status ssh.socket ssh.service"
+            return 1
+        fi
+    fi
+
+    # 4. Boot-Persistenz (A5 Teil 2): 'static' hat keinen [Install]-Abschnitt
+    # und gilt nur noch mit Korroboration — die jeweils ANDERE Unit muss
+    # enabled sein. 'masked' blockiert an beiden Stellen. Auf der gemessenen
+    # Flotte (enabled/disabled-Kombinationen) ändert sich nichts; das ist
+    # Vorsorge für künftige Hosts (Fall K-2 in tools/test-logic.sh).
     local socket_state svc_state
     socket_state=$(systemctl is-enabled ssh.socket 2>/dev/null) || true
     case "$socket_state" in
-        enabled|static) : ;;
-        disabled|masked|not-found|"")
+        enabled) : ;;
+        static)
+            svc_state=$(systemctl is-enabled ssh.service 2>/dev/null) || true
+            if [[ "$svc_state" != "enabled" ]]; then
+                log "ERROR" "ssh.socket='static' ohne enabled ssh.service (ist: '${svc_state:-<leer>}') — Boot-Persistenz unbelegt, Reboot BLOCKIERT."
+                log "ERROR" "Reparatur: systemctl enable ssh.socket  ODER  systemctl enable ssh.service"
+                return 1
+            fi ;;
+        masked)
+            log "ERROR" "ssh.socket='masked' — Reboot BLOCKIERT."
+            log "ERROR" "Reparatur: systemctl unmask ssh.socket  ODER  systemctl enable ssh.service"
+            return 1 ;;
+        disabled|not-found|"")
             svc_state=$(systemctl is-enabled ssh.service 2>/dev/null) || true
             case "$svc_state" in
-                enabled|static)
+                enabled)
                     log "INFO" "ssh.socket='${socket_state:-<leer>}' — ssh.service='${svc_state}' übernimmt Boot-Persistenz (OK)." ;;
+                static)
+                    log "ERROR" "ssh.service='static' ohne enabled ssh.socket (ist: '${socket_state:-<leer>}') — Boot-Persistenz unbelegt, Reboot BLOCKIERT."
+                    return 1 ;;
+                masked)
+                    log "ERROR" "ssh.service='masked' und ssh.socket='${socket_state:-<leer>}' — Reboot BLOCKIERT."
+                    log "ERROR" "Reparatur: systemctl unmask ssh.service  ODER  systemctl enable ssh.socket"
+                    return 1 ;;
                 *)
                     log "ERROR" "ssh.socket='${socket_state:-<leer>}' und ssh.service='${svc_state:-<leer>}' — Reboot BLOCKIERT."
                     log "ERROR" "Reparatur: systemctl enable ssh.socket  ODER  systemctl enable ssh.service"
@@ -1008,7 +1075,8 @@ verify_ssh_before_reboot() {
             return 1 ;;
     esac
 
-    log "SUCCESS" "SSH Pre-Flight OK (Port(s): $(echo "$ssh_ports" | tr '\n' ' '))"
+    # Regel 5: P_conf und L in der Meldung — Diagnose ohne zweiten Login
+    log "SUCCESS" "SSH Pre-Flight OK (sshd -T: $(tr '\n' ' ' <<<"$ssh_ports")· belegt als SSH-Lauscher: $(tr '\n' ' ' <<<"${l_ports:-keiner}"))"
     return 0
 }
 
