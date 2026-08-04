@@ -474,6 +474,21 @@ docker_cleanup() {
         return 0
     fi
 
+    # Warnschwellen validieren, BEVOR sie unten in [[ -lt ]] landen: ein
+    # nicht-numerischer Wert würde dort arithmetisch ausgewertet und unter
+    # set -u den Prozess töten — mitten zwischen Container-Stopp und -Start,
+    # und einen Expansionsfehler fängt auch das || in main() nicht ab.
+    # Anders als DOCKER_CLEANUP_DAYS (destruktiv → überspringen) fällt die
+    # reine Messung auf den Default zurück, damit die Eskalation aktiv bleibt.
+    if [[ ! "$DOCKER_PRUNE_WARN_FREE_PCT" =~ ^[0-9]+$ ]]; then
+        log "WARNING" "DOCKER_PRUNE_WARN_FREE_PCT='${DOCKER_PRUNE_WARN_FREE_PCT}' ist keine Zahl - verwende Default 10"
+        DOCKER_PRUNE_WARN_FREE_PCT=10
+    fi
+    if [[ ! "$DOCKER_PRUNE_WARN_FREE_MB" =~ ^[0-9]+$ ]]; then
+        log "WARNING" "DOCKER_PRUNE_WARN_FREE_MB='${DOCKER_PRUNE_WARN_FREE_MB}' ist keine Zahl - verwende Default 5120"
+        DOCKER_PRUNE_WARN_FREE_MB=5120
+    fi
+
     # Docker-Filter erwarten Stunden, die Konfiguration ist in Tagen
     local DOCKER_CLEANUP_HOURS=$(( DOCKER_CLEANUP_DAYS * 24 ))
 
