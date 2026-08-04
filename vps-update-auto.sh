@@ -177,6 +177,14 @@ detect_docker_compose() {
         log "WARNING" "Weder 'docker compose' noch 'docker-compose' gefunden (nur docker start verfügbar)"
     fi
     [[ -n "$DOCKER_COMPOSE" ]] && log "INFO" "Docker Compose: $DOCKER_COMPOSE"
+
+    # N17, gleiche Klasse wie N15: Findet der Host weder `docker compose` noch
+    # `docker-compose`, bleibt DOCKER_COMPOSE leer, der Test scheitert und die
+    # Funktion liefert 1. Der Aufruf ist nackt (:266) — unter `set -e` endete
+    # der Lauf damit, bevor irgendein Update-Schritt beginnt. Auf den sechs
+    # Hosts nicht erreichbar (alle betreiben Compose-basierte Stacks), aber
+    # dieselbe Falle.
+    return 0
 }
 
 # =====================================
@@ -472,6 +480,8 @@ update_system() {
 
 # Freiplatz-Schwelle: reine Prüf-Logik, ohne Docker testbar.
 # Argumente: <frei_mb> <gesamt_mb> <warn_pct> <warn_mb>
+# LINT: predicate — der Rückgabewert IST die Antwort ("ist der Platz knapp?").
+# Der terminale Testausdruck ist hier gewollt; der Aufruf steht in einem `if`.
 # Rückgabe 0 = Schwelle unterschritten, der Lauf soll als nicht erfolgreich enden.
 prune_free_space_low() {
     local free_mb=$1 size_mb=$2 warn_pct=$3 warn_mb=$4
