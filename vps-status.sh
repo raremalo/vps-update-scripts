@@ -18,6 +18,10 @@ UPG_SEC=${UPG_SEC:-0}
 # Reboot — steht er länger als REBOOT_OVERDUE_DAYS aus, endet vps-status mit
 # Exit 2, damit der Zustand maschinell auswertbar ist statt nur lesbar
 REBOOT_OVERDUE_DAYS="${REBOOT_OVERDUE_DAYS:-7}"
+if [[ ! "$REBOOT_OVERDUE_DAYS" =~ ^[1-9][0-9]*$ ]]; then
+  echo -e "${YELLOW}REBOOT_OVERDUE_DAYS='${REBOOT_OVERDUE_DAYS}' ist keine positive Zahl — verwende Default 7${NC}"
+  REBOOT_OVERDUE_DAYS=7
+fi
 RC=0
 RUNNING_KERNEL=$(uname -r)
 # Neuester installierter Kernel. sort -V ist Pflicht: ohne Versionssortierung
@@ -28,17 +32,25 @@ NEWEST_KERNEL=$({ dpkg-query -W -f='${Package}\t${Status}\n' 'linux-image-[0-9]*
 
 if [[ -f /var/run/reboot-required ]]; then
   # mtime ist eine UNTERGRENZE: jedes reboot-pflichtige Paket touch-t die Datei
-  # neu. Die Tageszahl (GNU stat) ist Kosmetik — die Eskalationsentscheidung
-  # hängt am portablen find.
-  AGE_DAYS=""
-  if MTIME=$(stat -c %Y /var/run/reboot-required 2>/dev/null); then
-    AGE_DAYS=$(( ($(date +%s) - MTIME) / 86400 ))
-  fi
-  if [[ -n "$(find /var/run/reboot-required -maxdepth 0 -mtime +"$REBOOT_OVERDUE_DAYS" -print 2>/dev/null)" ]]; then
-    echo -e "🔄 Reboot:  ${RED}ÜBERFÄLLIG — steht seit mindestens ${AGE_DAYS:-$REBOOT_OVERDUE_DAYS} Tagen aus, bitte manuell nachholen${NC}"
-    RC=2
+  # neu. Epochenvergleich statt find -mtime +N: find matcht erst ab N+1 VOLLEN
+  # Tagen (Tag 7 eskalierte real erst Tag 14), und ein find-Fehler sähe wie
+  # „nicht überfällig" aus. stat -c ist GNU, -f der BSD-Fallback; ein nicht
+  # ermittelbares Alter eskaliert fail-closed statt still weiterzulaufen.
+  MTIME=$(stat -c %Y /var/run/reboot-required 2>/dev/null) \
+    || MTIME=$(stat -f %m /var/run/reboot-required 2>/dev/null) \
+    || MTIME=""
+  if [[ "$MTIME" =~ ^[0-9]+$ ]]; then
+    AGE_SECS=$(( $(date +%s) - MTIME ))
+    AGE_DAYS=$(( AGE_SECS / 86400 ))
+    if (( AGE_SECS > REBOOT_OVERDUE_DAYS * 86400 )); then
+      echo -e "🔄 Reboot:  ${RED}ÜBERFÄLLIG — steht seit mindestens ${AGE_DAYS} Tagen aus, bitte manuell nachholen${NC}"
+      RC=2
+    else
+      echo -e "🔄 Reboot:  ${RED}erforderlich${NC} (seit mindestens ${AGE_DAYS} Tagen)"
+    fi
   else
-    echo -e "🔄 Reboot:  ${RED}erforderlich${NC} (seit mindestens ${AGE_DAYS:-0} Tagen)"
+    echo -e "🔄 Reboot:  ${RED}erforderlich — Alter nicht ermittelbar, gilt als ÜBERFÄLLIG${NC}"
+    RC=2
   fi
   if [[ -r /var/run/reboot-required.pkgs ]]; then
     echo -e "   Pakete:  $(sort -u /var/run/reboot-required.pkgs | tr '\n' ' ')"

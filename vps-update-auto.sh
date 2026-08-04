@@ -1032,10 +1032,25 @@ check_reboot_required() {
             log "WARNING" "Bitte manuell neustarten: reboot"
             # Überfälligkeit eskaliert über den Rückgabewert: main() fängt ihn
             # per RUN_RC ab (A3-0), alle Folgeschritte laufen weiter, die Unit
-            # geht auf failed. Portables find wie in vps-status — die
-            # Entscheidung hängt nicht an GNU stat.
-            if [[ -n "$(find /var/run/reboot-required -maxdepth 0 -mtime +"$REBOOT_OVERDUE_DAYS" -print 2>/dev/null)" ]]; then
-                log "WARNING" "Reboot steht seit mehr als ${REBOOT_OVERDUE_DAYS} Tagen aus — Lauf wird als nicht erfolgreich gemeldet"
+            # geht auf failed. Epochenvergleich statt find -mtime +N: find
+            # matcht erst ab N+1 VOLLEN Tagen (beim Wochentimer eskalierte
+            # Tag 7 real erst Tag 14), und ein find-Fehler — etwa durch eine
+            # kaputte Schwelle — sähe wie „nicht überfällig" aus. stat -c ist
+            # GNU, -f der BSD-Fallback; unbekanntes Alter gilt als überfällig.
+            local overdue_days="$REBOOT_OVERDUE_DAYS" marker_mtime
+            if [[ ! "$overdue_days" =~ ^[1-9][0-9]*$ ]]; then
+                log "WARNING" "REBOOT_OVERDUE_DAYS='${REBOOT_OVERDUE_DAYS}' ist keine positive Zahl - verwende Default 7"
+                overdue_days=7
+            fi
+            marker_mtime=$(stat -c %Y /var/run/reboot-required 2>/dev/null) \
+                || marker_mtime=$(stat -f %m /var/run/reboot-required 2>/dev/null) \
+                || marker_mtime=""
+            if [[ ! "$marker_mtime" =~ ^[0-9]+$ ]]; then
+                log "WARNING" "Alter von /var/run/reboot-required nicht ermittelbar - Lauf wird als nicht erfolgreich gemeldet"
+                return 1
+            fi
+            if (( $(date +%s) - marker_mtime > overdue_days * 86400 )); then
+                log "WARNING" "Reboot steht seit mehr als ${overdue_days} Tagen aus — Lauf wird als nicht erfolgreich gemeldet"
                 return 1
             fi
         fi
