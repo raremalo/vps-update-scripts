@@ -429,11 +429,20 @@ update_system() {
     # Vorzustand und bleibt damit unangetastet.
     log "INFO" "Halte problematische Pakete zurück..."
     local holds_before pkg
-    holds_before=$(apt-mark showhold 2>/dev/null || true)
-    for pkg in snapd ubuntu-advantage-tools; do
-        grep -qx "$pkg" <<<"$holds_before" || APT_HOLDS_ADDED="${APT_HOLDS_ADDED}${APT_HOLDS_ADDED:+ }${pkg}"
-    done
-    apt-mark hold snapd ubuntu-advantage-tools 2>/dev/null || true
+    if ! holds_before=$(apt-mark showhold 2>/dev/null); then
+        # Ohne lesbaren Vorzustand keine Holds setzen: mit leerer
+        # Differenzbasis stünden auch vom Administrator gehaltene Pakete in
+        # APT_HOLDS_ADDED, und der EXIT-Trap gäbe dessen Holds frei
+        log "WARNING" "apt-mark showhold fehlgeschlagen - Holds werden in diesem Lauf nicht gesetzt"
+    else
+        for pkg in snapd ubuntu-advantage-tools; do
+            grep -qx "$pkg" <<<"$holds_before" || APT_HOLDS_ADDED="${APT_HOLDS_ADDED}${APT_HOLDS_ADDED:+ }${pkg}"
+        done
+        # Scheitert das Setzen, bleibt APT_HOLDS_ADDED trotzdem stehen: die
+        # Pakete darin waren vorher nicht gehalten, ein unhold im Trap ist
+        # dann ein No-op — bei Teilerfolg räumt er den Rest korrekt ab
+        apt-mark hold snapd ubuntu-advantage-tools 2>/dev/null || true
+    fi
     
     # Führe Updates durch (nur upgrade, kein dist-upgrade)
     log "INFO" "Führe Paket-Updates durch..."
