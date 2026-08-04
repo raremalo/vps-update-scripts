@@ -884,14 +884,21 @@ security_check() {
     log "INFO" "=== Security Quick Check ==="
     
     # 1. Fehlgeschlagene SSH-Logins (letzte 24h)
-    local ssh_failed=0
+    # grep -c druckt die Trefferzahl selbst — auch die 0 — und endet bei null
+    # Treffern mit Exit 1. Ein '|| echo 0' hängt dann eine ZWEITE Null an
+    # ("0\n0"), und beide [[ -gt ]]-Vergleiche unten sterben am Syntaxfehler
+    # (N12, gefunden im Rollout-0-Volllauf auf vmd202656).
+    local ssh_failed=""
     if [[ -f /var/log/auth.log ]]; then
-        ssh_failed=$(grep -c "Failed password" /var/log/auth.log 2>/dev/null || echo "0")
+        ssh_failed=$(grep -c "Failed password" /var/log/auth.log 2>/dev/null || true)
     elif journalctl --version >/dev/null 2>&1; then
-        ssh_failed=$(journalctl -u sshd --since "24 hours ago" --no-pager 2>/dev/null | grep -c "Failed password" || echo "0")
+        ssh_failed=$(journalctl -u sshd --since "24 hours ago" --no-pager 2>/dev/null | grep -c "Failed password" || true)
     fi
-    
-    if [[ $ssh_failed -gt 100 ]]; then
+
+    if [[ ! "$ssh_failed" =~ ^[0-9]+$ ]]; then
+        # Messausfall sichtbar machen statt fail-open als "keine" zu melden
+        log "WARNING" "🔒 Fehlgeschlagene SSH-Logins nicht ermittelbar (Wert: '${ssh_failed}')"
+    elif [[ $ssh_failed -gt 100 ]]; then
         log "WARNING" "🔒 ${ssh_failed} fehlgeschlagene SSH-Logins in den letzten 24h"
     elif [[ $ssh_failed -gt 0 ]]; then
         log "INFO" "🔒 ${ssh_failed} fehlgeschlagene SSH-Logins (normal)"
