@@ -145,8 +145,14 @@ release_apt_holds() {
 }
 
 cleanup() {
-    release_apt_holds
-    rm -f "$LOCKFILE"
+    # Exitstatus des Skripts retten: Der Trap läuft unter set -e -o pipefail,
+    # ein Log-/IO-Fehler (z. B. tee auf volles Dateisystem) würde sonst den
+    # echten Status durch 1 ersetzen und das Lockfile liegen lassen. Jeder
+    # Schritt hier ist best-effort, das Lockfile wird immer entfernt.
+    local rc=$?
+    release_apt_holds || true
+    rm -f "$LOCKFILE" || true
+    exit "$rc"
 }
 
 emergency_restart() {
