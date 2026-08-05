@@ -32,7 +32,7 @@ set -uo pipefail
 #      Berechtigung". v1.1 meldete FLAVOR=no-docker, obwohl docker.service
 #      lief und nur der Zugriff ohne sudo fehlte — irreführend im Vergleich
 #      über mehrere Hosts.
-readonly SELFTEST_VERSION="1.4"
+readonly SELFTEST_VERSION="1.5"
 
 # ---------------------------------------------------------------------------
 # Ausgabe-Helfer
@@ -634,6 +634,7 @@ fleet_summary() {
     # Entscheidung. Deshalb wird VOR dem Zaehlen der Status des jeweiligen
     # Kommandos geprueft, nicht nur dessen (leere) Ausgabe.
     local swarm="unknown" global="unknown" zero="unknown" dangling="unknown"
+    local build_cache="unknown" build_cache_records="unknown"
     if have docker && docker info >/dev/null 2>&1; then
         local st ctrl st_rc ctrl_rc
         st=$(docker info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null);   st_rc=$?
@@ -667,11 +668,33 @@ fleet_summary() {
             # Leere Ausgabe zaehlt damit korrekt als 0, nicht als 1.
             dangling=$(printf '%s\n' "$vols" | grep -c '.')
         fi
+
+        # Build-Cache (C8) — Groesse und Anzahl, bewusst OHNE "Reclaimable".
+        #
+        # Diese Spalte bedeutet "waere grundsaetzlich loeschbar", NICHT "wird
+        # nicht gebraucht". Am 04.08. wies sie auf vmd183199 30,27 GB aus, von
+        # denen kein einziges Byte prunebar war — auch nicht bei einem einzeln
+        # per "--filter id=" adressierten Eintrag. Grund: Die scheinbar toten
+        # Eintraege sind Basis-Layer aktiver Builds; der "Last used"-Stempel
+        # eines Elternteils wird nicht aufgefrischt, wenn ein Kind benutzt wird.
+        # Die Zahl hier auszuweisen haette den Irrtum nur konserviert.
+        #
+        # Fuer die Frage, die dieser Block beantworten soll — "waechst der
+        # Cache?" — zaehlen Groesse und Anzahl im Verlauf, nichts sonst.
+        local bc_line
+        bc_line=$(docker system df --format '{{.Type}}|{{.TotalCount}}|{{.Size}}' 2>/dev/null \
+            | grep '^Build Cache|' || true)
+        if [[ -n "$bc_line" ]]; then
+            build_cache=$(printf '%s' "$bc_line" | cut -d'|' -f3)
+            build_cache_records=$(printf '%s' "$bc_line" | cut -d'|' -f2)
+        fi
     fi
     printf 'SWARM=%s\n'             "$swarm"
     printf 'GLOBAL_SERVICES=%s\n'   "$global"
     printf 'SERVICES_AT_ZERO=%s\n'  "$zero"
     printf 'DANGLING_VOLUMES=%s\n'  "$dangling"
+    printf 'BUILD_CACHE=%s\n'         "$build_cache"
+    printf 'BUILD_CACHE_RECORDS=%s\n' "$build_cache_records"
 
     # APT — "none" darf ausschliesslich nach einer ERFOLGREICHEN Abfrage stehen.
     local apt_holds="unknown"
