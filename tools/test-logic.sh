@@ -322,12 +322,219 @@ case_stack_verify() {
 }
 
 # ---------------------------------------------------------------------------
+# Fallgruppe apt-update: kompletter Update-Pfad mit simuliertem Paketbestand.
+# Eine neue Kernel-Version braucht ein neues Paket. Ohne --with-new-pkgs
+# bleibt sie alt; bestehende Holds bleiben auch nach Fehlern unangetastet.
+# Die Ergebniszahlen werden am Log des echten update_system() geprüft.
+# ---------------------------------------------------------------------------
+
+build_apt_update_runner() {
+    {
+        cat <<'HEAD'
+set -euo pipefail
+APT_HOLDS_ADDED=""
+APT_OUTPUT_FILE=""
+LOCKFILE="$T_DIR/update.lock"
+log() { local level="$1"; shift; printf 'LOG %s %s\n' "$level" "$*"; }
+phase_start() { :; }
+phase_end() { :; }
+wait_for_apt_lock() { return 0; }
+apt() {
+    [[ "$T_CASE" != list-error ]] || return 100
+    [[ "$T_CASE" != headerless ]] && printf 'Listing...\n'
+    [[ "$T_CASE" != empty ]] || return 0
+    printf '%s\n' \
+        'linux-generic/noble-updates 2 amd64 [upgradable from: 1]' \
+        'snapd/noble-updates 2 amd64 [upgradable from: 1]' \
+        'held-app/noble 2 amd64 [upgradable from: 1]'
+}
+apt-mark() {
+    local action="${1:-}" pkg
+    shift
+    case "$action" in
+        showhold)
+            [[ "$T_CASE" != hold-read-error ]] || return 100
+            cat "$T_DIR/holds"
+            ;;
+        hold)
+            for pkg in "$@"; do
+                grep -qxF "$pkg" "$T_DIR/holds" || printf '%s\n' "$pkg" >> "$T_DIR/holds"
+            done
+            ;;
+        unhold)
+            for pkg in "$@"; do
+                awk -v pkg="$pkg" '$0 != pkg' "$T_DIR/holds" > "$T_DIR/holds.next"
+                mv "$T_DIR/holds.next" "$T_DIR/holds"
+            done
+            ;;
+        *) return 2 ;;
+    esac
+}
+apt-get() {
+    local new_allowed=false no_remove=false assume_yes=false
+    local confdef=false confold=false action="" arg
+    for arg in "$@"; do
+        case "$arg" in
+            --with-new-pkgs) new_allowed=true ;;
+            --no-remove) no_remove=true ;;
+            -y|--assume-yes) assume_yes=true ;;
+            Dpkg::Options::=--force-confdef) confdef=true ;;
+            Dpkg::Options::=--force-confold) confold=true ;;
+            update|upgrade|autoremove|autoclean) action="$arg" ;;
+        esac
+    done
+    case "$action" in
+        update) return 0 ;;
+        autoremove) [[ "$T_CASE" != autoremove-error ]]; return $? ;;
+        autoclean) [[ "$T_CASE" != autoclean-error ]]; return $? ;;
+        upgrade)
+            [[ "$new_allowed" == true && "$no_remove" == true && "$assume_yes" == true \
+                && "$confdef" == true && "$confold" == true \
+                && "${LC_ALL:-}" == C && "${DEBIAN_FRONTEND:-}" == noninteractive ]] || {
+                printf 'E: required APT options or locale missing\n' >&2
+                return 99
+            }
+            [[ "$T_CASE" != empty ]] || return 100
+            if [[ "$T_CASE" == signal ]]; then
+                kill -TERM "$$"
+                return 143
+            fi
+            printf 'The following packages will be upgraded:\n'
+            if [[ "$T_CASE" == apt-error ]]; then
+                printf '1 upgraded, 1 newly installed, 0 to remove and 2 not upgraded.\n'
+                printf 'E: Failed to fetch package\n' >&2
+                return 100
+            fi
+            if [[ "$T_CASE" == removed ]]; then
+                printf '1 upgraded, 1 newly installed, 1 to remove and 0 not upgraded.\n'
+                return 0
+            fi
+            if [[ "$T_CASE" == unknown ]]; then
+                printf 'Unbekanntes APT-Ausgabeformat\n'
+                return 0
+            fi
+            if [[ "$T_CASE" == nonnumeric ]]; then
+                printf 'wrong upgraded, 1 newly installed, 0 to remove and 2 not upgraded.\n'
+                return 0
+            fi
+            if [[ "$T_CASE" != dependency-held && "$T_CASE" != held ]]; then
+                printf '2\n' > "$T_DIR/kernel-version"
+                printf '2\n' > "$T_DIR/new-kernel"
+                printf '1 upgraded, 1 newly installed, 0 to remove and 2 not upgraded.\n'
+            else
+                printf '0 upgraded, 0 newly installed, 0 to remove and 3 not upgraded.\n'
+            fi
+            return 0
+            ;;
+        *) return 2 ;;
+    esac
+}
+tee() {
+    if [[ "$T_CASE" == tee-error ]]; then
+        cat
+        return 1
+    fi
+    command tee "$@"
+}
+HEAD
+        awk '/^parse_apt_summary\(\)/,/^}/' "$TARGET"
+        extract_fn release_apt_holds
+        extract_fn cleanup
+        extract_fn update_system
+        cat <<'FOOT'
+trap cleanup EXIT
+if update_system; then
+    exit 0
+else
+    exit 1
+fi
+FOOT
+    } > "$WORKDIR/apt-update-runner.sh"
+}
+
+run_apt_update() {
+    local name="$1" exp_rc="$2" exp_version="$3" exp_counts="$4" exp_candidates="${5:-}"
+    local dir="$WORKDIR/apt-$name" out rc counts success_counts candidate_count bad="" holds
+    mkdir "$dir" "$dir/tmp"
+    printf '1\n' > "$dir/kernel-version"
+    printf 'held-app\n' > "$dir/holds.before"
+    case "$name" in
+        held) printf 'snapd\nubuntu-advantage-tools\n' >> "$dir/holds.before" ;;
+        dependency-held) printf 'linux-generic\n' >> "$dir/holds.before" ;;
+    esac
+    cp "$dir/holds.before" "$dir/holds"
+    local tmpdir="$dir/tmp"
+    [[ "$name" == mktemp-error ]] && tmpdir="$dir/missing"
+    out=$(T_CASE="$name" T_DIR="$dir" TMPDIR="$tmpdir" \
+        "$BASH" "$WORKDIR/apt-update-runner.sh" 2>&1)
+    rc=$?
+    candidate_count=$(printf '%s\n' "$out" | sed -nE \
+        's/^.* ([0-9]+) installierte Pakete mit Update-Kandidat gefunden:$/\1/p')
+    counts=$(printf '%s\n' "$out" | sed -nE \
+        's/^.*APT-Ergebnis: ([0-9]+) aktualisiert, ([0-9]+) neu installiert, ([0-9]+) entfernt, ([0-9]+) nicht aktualisiert$/\1 \2 \3 \4/p')
+    success_counts=$(printf '%s\n' "$out" | sed -nE \
+        's/^.*System-Updates abgeschlossen \(([0-9]+) Pakete aktualisiert, ([0-9]+) neue Pakete installiert\)$/\1 \2/p')
+    holds=$(cat "$dir/holds")
+    if [[ "$rc" != "$exp_rc" ]]; then
+        bad="exit=$rc (soll $exp_rc)"
+    elif [[ $(cat "$dir/kernel-version") != "$exp_version" ]]; then
+        bad="Kernel-Abhängigkeit nicht wie erwartet aktualisiert"
+    elif [[ "$exp_version" == 2 && ! -f "$dir/new-kernel" ]]; then
+        bad="Kernel-Abhängigkeit fehlt"
+    elif [[ "$counts" != "$exp_counts" ]]; then
+        bad="APT-Ergebniszahlen=[$counts] (soll [$exp_counts])"
+    elif [[ -n "$exp_candidates" && "$candidate_count" != "$exp_candidates" ]]; then
+        bad="Kandidatenzahl=$candidate_count (soll $exp_candidates)"
+    elif [[ -z "$exp_counts" ]] \
+        && printf '%s\n' "$out" | grep -q '^LOG SUCCESS System-Updates abgeschlossen'; then
+        bad="SUCCESS meldet Abschluss trotz unbekanntem APT-Ergebnis"
+    elif [[ "$exp_counts" != '' && "$success_counts" != "$(printf '%s' "$exp_counts" | awk '{print $1, $2}')" ]]; then
+        bad="SUCCESS-Zahlen=[$success_counts] stimmen nicht mit APT überein"
+    elif [[ "$holds" != "$(cat "$dir/holds.before")" ]]; then
+        bad="Holds nach dem Lauf verändert"
+    elif compgen -G "$dir/tmp/vps-update-apt.*" >/dev/null; then
+        bad="Temporäre APT-Ausgabe nach dem Lauf zurückgeblieben"
+    elif [[ "$name" == unknown || "$name" == nonnumeric || "$name" == tee-error \
+        || "$name" == held || "$name" == dependency-held || "$name" == hold-read-error ]] \
+        && ! printf '%s\n' "$out" | grep -q '^LOG WARNING '; then
+        bad="Offene Updates oder unbekanntes Ergebnis ohne Warnung"
+    fi
+    if [[ -n "$bad" ]]; then
+        fail "$name" "$bad"
+        printf '%s\n' "$out" | sed 's/^/         | /'
+    else
+        ok "$name"
+    fi
+}
+
+case_apt_update() {
+    printf '=== Fallgruppe apt-update gegen: %s ===\n' "$TARGET"
+    build_apt_update_runner
+    run_apt_update headerless 0 2 '1 1 0 2' 3
+    run_apt_update held 0 1 '0 0 0 3' 3
+    run_apt_update dependency-held 0 1 '0 0 0 3' 3
+    run_apt_update hold-read-error 0 2 '1 1 0 2' 3
+    run_apt_update empty 0 1 ''
+    run_apt_update list-error 1 1 ''
+    run_apt_update apt-error 1 1 ''
+    run_apt_update removed 1 1 ''
+    run_apt_update unknown 0 1 ''
+    run_apt_update nonnumeric 0 1 ''
+    run_apt_update tee-error 0 2 ''
+    run_apt_update mktemp-error 1 1 ''
+    run_apt_update autoremove-error 0 2 '1 1 0 2' 3
+    run_apt_update autoclean-error 0 2 '1 1 0 2' 3
+    run_apt_update signal 143 1 ''
+}
+
+# ---------------------------------------------------------------------------
 
 case "$CASE_FILTER" in
-    "") case_ssh_guard; printf '\n'; case_stack_verify ;;
+    "") case_ssh_guard; printf '\n'; case_stack_verify; printf '\n'; case_apt_update ;;
     ssh-guard) case_ssh_guard ;;
     stack-verify) case_stack_verify ;;
-    *) die "unbekannte Fallgruppe: $CASE_FILTER (vorhanden: ssh-guard, stack-verify)" ;;
+    apt-update) case_apt_update ;;
+    *) die "unbekannte Fallgruppe: $CASE_FILTER (vorhanden: ssh-guard, stack-verify, apt-update)" ;;
 esac
 
 printf '\nErgebnis: %s gruen, %s rot\n' "$PASS" "$FAIL"

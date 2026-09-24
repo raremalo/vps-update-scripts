@@ -131,6 +131,9 @@ rotate_log() {
 # vorher gehaltene Pakete bleiben unangetastet.
 APT_HOLDS_ADDED=""
 
+# APT-Ausgabe bleibt nur bis zum EXIT-Trap erhalten, auch bei Abbruch.
+APT_OUTPUT_FILE=""
+
 release_apt_holds() {
     if [[ -n "$APT_HOLDS_ADDED" ]]; then
         # Wortaufspaltung der Paketliste ist gewollt
@@ -151,6 +154,9 @@ cleanup() {
     # Schritt hier ist best-effort, das Lockfile wird immer entfernt.
     local rc=$?
     release_apt_holds || true
+    if [[ -n "$APT_OUTPUT_FILE" ]]; then
+        rm -f -- "$APT_OUTPUT_FILE" || true
+    fi
     rm -f "$LOCKFILE" || true
     exit "$rc"
 }
@@ -404,6 +410,30 @@ wait_for_apt_lock() {
     log "INFO" "Apt-Lock verfügbar"
 }
 
+# Liest die englische APT-2.x-Planzeile: aktualisiert, neu, entfernt, offen.
+# Nur nach Exit 0 des echten Upgrades als Ergebnis verwenden; kein stabiles API.
+parse_apt_summary() {
+    awk '
+        $1 ~ /^(0|[1-9][0-9]*)$/ &&
+        $3 ~ /^(0|[1-9][0-9]*)$/ &&
+        $6 ~ /^(0|[1-9][0-9]*)$/ &&
+        $10 ~ /^(0|[1-9][0-9]*)$/ &&
+        $2 == "upgraded," &&
+        $4 == "newly" &&
+        $5 == "installed," &&
+        $7 == "to" &&
+        $8 == "remove" &&
+        $9 == "and" &&
+        $11 == "not" &&
+        $12 == "upgraded." {
+            print $1, $3, $6, $10
+            found=1
+            exit
+        }
+        END { if (!found) exit 1 }
+    '
+}
+
 update_system() {
     phase_start
     
@@ -419,9 +449,14 @@ update_system() {
         return 1
     }
     
-    # Liste aktualisierbarer Pakete
+    # Nur echte Kandidatenzeilen auswerten; der optionale APT-Header ist
+    # keine Datenzeile und darf nicht per Zeilennummer vorausgesetzt werden.
     local upgradable
-    upgradable=$(apt list --upgradable 2>/dev/null | grep -v "^Listing" || true)
+    if ! upgradable=$(LC_ALL=C apt list --upgradable 2>/dev/null \
+        | awk '/\[upgradable from: / {print}'); then
+        log "ERROR" "Update-Kandidaten konnten nicht ermittelt werden"
+        return 1
+    fi
     
     if [[ -z "$upgradable" ]]; then
         log "INFO" "Keine Paket-Updates verfügbar"
@@ -429,11 +464,12 @@ update_system() {
         return 0
     fi
     
-    # Zeige was aktualisiert wird
+    # Zeige die gefundenen Kandidaten; APT kann einzelne davon wegen Holds
+    # oder fehlender Abhaengigkeiten zurueckhalten.
     local pkg_count
-    pkg_count=$(echo "$upgradable" | wc -l)
-    log "INFO" "${pkg_count} Pakete werden aktualisiert:"
-    echo "$upgradable" | while read -r line; do
+    pkg_count=$(printf '%s\n' "$upgradable" | grep -c . || true)
+    log "INFO" "${pkg_count} installierte Pakete mit Update-Kandidat gefunden:"
+    printf '%s\n' "$upgradable" | while read -r line; do
         log "INFO" "  → $line"
     done
     
@@ -454,24 +490,54 @@ update_system() {
         done
         # Scheitert das Setzen, bleibt APT_HOLDS_ADDED trotzdem stehen: die
         # Pakete darin waren vorher nicht gehalten, ein unhold im Trap ist
-        # dann ein No-op — bei Teilerfolg räumt er den Rest korrekt ab
+        # dann ein No-op — bei Teilerfolg räumt der Trap den Rest korrekt ab
         apt-mark hold snapd ubuntu-advantage-tools 2>/dev/null || true
     fi
     
-    # Führe Updates durch (nur upgrade, kein dist-upgrade)
+    # Neue Abhaengigkeiten sind erlaubt, Paketentfernungen im Upgrade nicht.
+    # LC_ALL=C normalisiert die Ausgabe; die Anzahl gilt erst nach APT-Exit 0.
     log "INFO" "Führe Paket-Updates durch..."
-    DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" || {
-        log "ERROR" "apt-get upgrade fehlgeschlagen"
+    local apt_summary updated new_packages removed held
+    local -a apt_status=(0 0)
+    APT_OUTPUT_FILE=$(mktemp "${TMPDIR:-/tmp}/vps-update-apt.XXXXXX") || {
+        log "ERROR" "Temporäre Datei für APT-Ausgabe konnte nicht angelegt werden"
         return 1
     }
-    
-    # Aufräumen
+    if ! DEBIAN_FRONTEND=noninteractive LC_ALL=C \
+        apt-get --with-new-pkgs --no-remove upgrade -y \
+        -o Dpkg::Options::="--force-confdef" \
+        -o Dpkg::Options::="--force-confold" 2>&1 | tee "$APT_OUTPUT_FILE"; then
+        apt_status=("${PIPESTATUS[@]}")
+    fi
+    if (( apt_status[0] != 0 )); then
+        log "ERROR" "apt-get upgrade fehlgeschlagen"
+        return 1
+    fi
+    if (( apt_status[1] == 0 )) && apt_summary=$(parse_apt_summary < "$APT_OUTPUT_FILE"); then
+        read -r updated new_packages removed held <<< "$apt_summary"
+        if (( removed > 0 )); then
+            log "ERROR" "APT meldet ${removed} entfernte Pakete trotz --no-remove"
+            return 1
+        fi
+        log "SUCCESS" "System-Updates abgeschlossen (${updated} Pakete aktualisiert, ${new_packages} neue Pakete installiert)"
+        log "INFO" "APT-Ergebnis: ${updated} aktualisiert, ${new_packages} neu installiert, ${removed} entfernt, ${held} nicht aktualisiert"
+        if (( held > 0 )); then
+            log "WARNING" "Updates bleiben offen (z. B. eigene temporäre Holds oder gestaffelte Updates); bestehende Holds bleiben respektiert"
+        fi
+    else
+        # Ein Auswertungs-/tee-Fehler ist kein fehlgeschlagenes Upgrade.
+        # Keine Kandidatenzahl erfinden und den normalen Wiederanlauf fortsetzen.
+        log "WARNING" "APT-Upgrade erfolgreich; Paketanzahlen unbekannt (Ausgabe nicht vollständig auswertbar)"
+    fi
+
+    # Separate Bereinigung wie bisher: autoremove darf verwaiste Pakete entfernen.
+    # Die obigen Zahlen beziehen sich ausschliesslich auf den Upgrade-Schritt.
     log "INFO" "Räume alte Pakete auf..."
-    apt-get autoremove -y
-    apt-get autoclean
-    
-    log "SUCCESS" "System-Updates abgeschlossen (${pkg_count} Pakete aktualisiert)"
-    phase_end "System-Update (${pkg_count} Pakete)"
+    apt-get autoremove -y || log "WARNING" "apt-get autoremove fehlgeschlagen"
+    apt-get autoclean || log "WARNING" "apt-get autoclean fehlgeschlagen"
+
+    phase_end "System-Update"
+    return 0
 }
 
 # =====================================
