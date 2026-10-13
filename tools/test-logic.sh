@@ -198,6 +198,19 @@ extract_fn() {
     printf '%s\n' "$src"
 }
 
+# Wie extract_fn, aber ohne die(): Für Funktionen, die erst in einem neueren
+# Stand existieren. Fehlt die Funktion im Ziel (z. B. TEST_LOGIC_TARGET auf
+# einen Stand vor v2.2), liefert der Aufruf nichts zurück und der Aufrufer
+# legt einen No-Op-Stub nach — sonst stürbe der historische Lauf in extract_fn
+# ab, BEVOR irgendeine Assertion die Fälle rot machen könnte
+# (Codex-Review 13.10.2026, B2).
+extract_fn_optional() {
+    local fn="$1" src
+    src=$(awk "/^${fn}\\(\\)/,/^}/" "$TARGET")
+    [[ -n "$src" ]] || return 1
+    printf '%s\n' "$src"
+}
+
 build_coolify_verify_runner() {
     {
         cat <<'HEAD'
@@ -528,13 +541,222 @@ case_apt_update() {
 }
 
 # ---------------------------------------------------------------------------
+# Fallgruppe apt-lock: wait_for_apt_lock + Pre-Flight-Reihenfolge in main()
+#
+# Vorfall 04.10.2026 (vmd168409, Mailcow): main() stoppte ALLE Container,
+# bevor update_system() auf den apt-Lock wartete. Ein anderer Prozess
+# (unattended-upgrades) hielt den Lock länger als 300s — Ergebnis:
+# 5:40 min Mail-Downtime, Abbruch ohne Update, Notfall-Restart.
+#
+# Seit v2.2 wartet main() VOR dem Container-Stopp. Geprüft wird beides
+# getrennt:
+#   - wait_for_apt_lock selbst: free / busy / busy-dann-frei, inkl.
+#     Lock-Inhaber-Diagnose (fuser + ps sind gestubbt)
+#   - main()-Reihenfolge: Lock-busy beendet den Lauf, OHNE dass
+#     stop_docker_containers je markiert wird
+# ---------------------------------------------------------------------------
+
+build_apt_lock_runner() {
+    {
+        cat <<'HEAD'
+set -euo pipefail
+APT_LOCK_WAIT=3
+APT_LOCK_INTERVAL=1
+log() { local level="$1"; shift; printf 'LOG %s %s\n' "$level" "$*"; }
+FUSER_CALLS=0
+fuser() {
+    case "${T_FUSER:-free}" in
+        free) return 1 ;;
+        busy) printf '4242\n'; return 0 ;;
+        # Regelfall Vorfall 04.10.2026: EIN Prozess hält mehrere Lock-Dateien,
+        # fuser meldet ihn mehrfach (Codex-Review 13.10.2026, B1)
+        dupe) printf '4242 4242\n'; return 0 ;;
+        multi) printf '1111 2222 1111\n'; return 0 ;;
+        busy2free)
+            FUSER_CALLS=$((FUSER_CALLS + 1))
+            if [[ $FUSER_CALLS -le 2 ]]; then printf '4242\n'; return 0; fi
+            return 1
+            ;;
+        *) return 1 ;;
+    esac
+}
+# Argumentvertrag des Produzenten: procps-ps akzeptiert nur EINE
+# kommagetrennte -p-Liste ohne Duplikate. Der Stub erzwingt exakt das —
+# leere, gedoppelte oder falsch geformte Aufrufe werden rot, statt wie
+# bisher bedingungslos grün durchzuwinken (Codex-Review 13.10.2026, B1/B8).
+ps() {
+    [[ "${1:-}" == "-p" ]] || { printf 'ps-stub: Vertrag verletzt (erwartet: -p CSV -o fmt): %s\n' "$*" >&2; return 2; }
+    [[ "${2:-}" =~ ^[0-9]+(,[0-9]+)*$ ]] || { printf 'ps-stub: keine CSV-PID-Liste: %s\n' "${2:-}" >&2; return 2; }
+    [[ "$#" -eq 4 && "${3:-}" == "-o" && "${4:-}" == "pid=,user=,etime=,comm=" ]] || { printf 'ps-stub: Argumente nach -p CSV falsch: %s\n' "$*" >&2; return 2; }
+    local p seen=""
+    local IFS=','
+    for p in $2; do
+        [[ ",$seen," == *",$p,"* ]] && { printf 'ps-stub: doppelte PID im CSV: %s\n' "$2" >&2; return 2; }
+        seen="${seen:+$seen,}$p"
+        printf '  %s root     05:30 %s\n' "$p" "${T_COMM:-unattended-upgr}"
+    done
+}
+sleep() { printf 'x' >> "$T_DIR/ticks"; }
+HEAD
+        extract_fn_optional apt_lock_holders || printf 'apt_lock_holders() { return 1; }\n'
+        extract_fn_optional log_lock_holders || printf 'log_lock_holders() { return 0; }\n'
+        extract_fn wait_for_apt_lock
+        cat <<'FOOT'
+wait_for_apt_lock
+FOOT
+    } > "$WORKDIR/apt-lock-runner.sh"
+}
+
+build_main_order_runner() {
+    {
+        cat <<'HEAD'
+set -euo pipefail
+DEPLOYMENT_SYSTEM="none"
+DEPLOYMENT_PATH=""
+SECONDS=0
+log() { local level="$1"; shift; printf 'LOG %s %s\n' "$level" "$*"; }
+mark() { printf '%s\n' "$1" >> "$T_DIR/order"; }
+format_duration() { printf '%ss' "$1"; }
+check_prerequisites() { mark prereq; }
+check_disk_space() { mark disk; }
+wait_for_apt_lock() {
+    mark lock
+    if [[ "${T_LOCK:-}" == busy ]]; then return 1; fi
+    return 0
+}
+stop_docker_containers() { mark stop; }
+update_system() {
+    mark update
+    if [[ "${T_UPDATE:-}" == fail ]]; then return 1; fi
+    return 0
+}
+emergency_restart() { mark emergency; }
+show_final_status() { mark final; }
+docker_cleanup() { mark cleanup; return 0; }
+start_deployment_stack() { mark stack; }
+start_other_containers() { mark other; }
+check_container_health() { mark health; }
+security_check() { mark security; }
+check_reboot_required() { mark reboot; return 0; }
+show_summary() { mark summary; }
+HEAD
+        extract_fn main
+        cat <<'FOOT'
+main
+FOOT
+    } > "$WORKDIR/main-order-runner.sh"
+}
+
+# Gemeinsame Assertions: Soll-Exit-Code, Muss-Muster (';'-getrennt, ALLE
+# gefordert), Verbot-Muster (';'-getrennt, KEINES erlaubt), Soll-Tick-Anzahl
+# der sleep-Aufrufe ('' = nicht prüfen).
+check_run_output() {
+    # Argumente: name, ausgabe, soll-rc, ist-rc, must, forbid, ticks-file, exp-ticks
+    local name="$1" out="$2" exp_rc="$3" rc="$4" must="$5" forbid="$6"
+    local ticks_file="$7" exp_ticks="$8" bad="" m
+    if [[ "$rc" != "$exp_rc" ]]; then
+        bad="exit=$rc (soll $exp_rc)"
+    fi
+    if [[ -z "$bad" ]]; then
+        local IFS=';'
+        for m in $must; do
+            [[ -n "$m" ]] || continue
+            printf '%s\n' "$out" | grep -Eq "$m" || { bad="fehlt Muster: $m"; break; }
+        done
+    fi
+    if [[ -z "$bad" ]]; then
+        local IFS=';'
+        for m in $forbid; do
+            [[ -n "$m" ]] || continue
+            printf '%s\n' "$out" | grep -Eq "$m" && { bad="enthält verbotenes Muster: $m"; break; }
+        done
+    fi
+    if [[ -z "$bad" && -n "$exp_ticks" ]]; then
+        local ticks
+        # Fehlende Datei = nie geschlafen = 0 Ticks; sonst Bytes zählen
+        # (sleep-Stub hängt pro Aufruf ein 'x' an)
+        ticks=0
+        [[ -f "$ticks_file" ]] && ticks=$(wc -c < "$ticks_file" | tr -d '[:space:]')
+        [[ "$ticks" == "$exp_ticks" ]] || bad="sleep-Ticks=[$ticks] (soll [$exp_ticks])"
+    fi
+    if [[ -n "$bad" ]]; then
+        fail "$name" "$bad"
+        printf '%s\n' "$out" | sed 's/^/         | /'
+    else
+        ok "$name"
+    fi
+}
+
+run_apt_lock() {
+    # Argumente: name, Soll-rc, Muss-Muster, Verbot-Muster, Soll-Ticks
+    local name="$1" exp_rc="$2" must="$3" forbid="$4" exp_ticks="${5:-}"
+    local dir="$WORKDIR/lock-$name" out rc
+    mkdir "$dir"
+    out=$(T_FUSER="$name" T_DIR="$dir" "$BASH" "$WORKDIR/apt-lock-runner.sh" 2>&1)
+    rc=$?
+    check_run_output "$name" "$out" "$exp_rc" "$rc" "$must" "$forbid" "$dir/ticks" "$exp_ticks"
+}
+
+run_main_order() {
+    # Argumente: name, T_LOCK-Wert, Soll-rc, Soll-Reihenfolge (';'), Muss, Verbot
+    local name="$1" lock="$2" exp_rc="$3" expected="$4" must="${5:-}" forbid="${6:-}"
+    local dir="$WORKDIR/order-$name" out rc order want bad
+    mkdir "$dir"
+    out=$(T_LOCK="$lock" T_DIR="$dir" "$BASH" "$WORKDIR/main-order-runner.sh" 2>&1)
+    rc=$?
+    order=$(cat "$dir/order" 2>/dev/null || true)
+    want=$(printf '%s\n' "$expected" | tr ';' '\n')
+    if [[ "$order" != "$want" ]]; then
+        fail "$name" "Reihenfolge=[$(printf '%s' "$order" | tr '\n' ';')] (soll [$expected])"
+        printf '%s\n' "$out" | sed 's/^/         | /'
+        return
+    fi
+    check_run_output "$name" "$out" "$exp_rc" "$rc" "$must" "$forbid" "" ""
+}
+
+case_apt_lock() {
+    printf '=== Fallgruppe apt-lock gegen: %s ===\n' "$TARGET"
+    build_apt_lock_runner
+    build_main_order_runner
+    run_apt_lock free 0 \
+        'Apt-Lock verfügbar' \
+        'belegt durch;Lock-Inhaber;Warte auf' \
+        0
+    run_apt_lock busy2free 0 \
+        'Apt-Lock belegt durch.*unattended-upgr;Warte auf apt-Lock\.\.\. \(1/3s\);Apt-Lock verfügbar' \
+        'Lock-Inhaber' \
+        2
+    run_apt_lock busy 1 \
+        'konnte nach 3s nicht erhalten;Lock-Inhaber.*unattended-upgr;Warte auf apt-Lock\.\.\. \(2/3s\)' \
+        'Apt-Lock verfügbar' \
+        3
+    run_apt_lock dupe 1 \
+        'belegt durch.*4242.*unattended-upgr;Lock-Inhaber.*4242.*unattended-upgr;konnte nach 3s nicht erhalten' \
+        'Apt-Lock verfügbar;Vertrag verletzt;doppelte PID' \
+        3
+    run_apt_lock multi 1 \
+        'belegt durch.*1111.*unattended-upgr;Lock-Inhaber.*2222.*unattended-upgr;konnte nach 3s nicht erhalten' \
+        'Apt-Lock verfügbar;Vertrag verletzt;doppelte PID' \
+        3
+    run_main_order ok free 0 \
+        'prereq;disk;lock;stop;update;cleanup;stack;other;health;final;security;reboot;summary' \
+        '' \
+        'mit Fehlern abgebrochen'
+    run_main_order lock-busy busy 1 \
+        'prereq;disk;lock' \
+        'Abbruch vor dem Container-Stopp' \
+        'Notfall'
+}
+
+# ---------------------------------------------------------------------------
 
 case "$CASE_FILTER" in
-    "") case_ssh_guard; printf '\n'; case_stack_verify; printf '\n'; case_apt_update ;;
+    "") case_ssh_guard; printf '\n'; case_stack_verify; printf '\n'; case_apt_update; printf '\n'; case_apt_lock ;;
     ssh-guard) case_ssh_guard ;;
     stack-verify) case_stack_verify ;;
     apt-update) case_apt_update ;;
-    *) die "unbekannte Fallgruppe: $CASE_FILTER (vorhanden: ssh-guard, stack-verify, apt-update)" ;;
+    apt-lock) case_apt_lock ;;
+    *) die "unbekannte Fallgruppe: $CASE_FILTER (vorhanden: ssh-guard, stack-verify, apt-update, apt-lock)" ;;
 esac
 
 printf '\nErgebnis: %s gruen, %s rot\n' "$PASS" "$FAIL"

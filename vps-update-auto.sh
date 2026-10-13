@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # vps-update-auto.sh
 # Intelligentes VPS Update-Skript das automatisch Coolify oder Dokploy erkennt
-# Version 2.1
+# Version 2.2
 
 set -euo pipefail
 
@@ -263,12 +263,6 @@ detect_deployment_system() {
 # Voraussetzungen prüfen
 # =====================================
 check_prerequisites() {
-    # Root-Check
-    if [[ $EUID -ne 0 ]]; then
-        log "ERROR" "Dieses Skript muss als root ausgeführt werden"
-        exit 1
-    fi
-
     # Atomic lock
     exec 9>"$LOCKFILE"
     flock -n 9 || { log "ERROR" "Script läuft bereits (Lock: $LOCKFILE)"; exit 1; }
@@ -392,17 +386,51 @@ stop_generic_containers() {
 # =====================================
 # apt mit Lock-Retry
 # =====================================
+
+# Welche Prozesse halten aktuell einen apt/dpkg-Lock? Rein für die Diagnose
+# im Warteloop: fuser meldet die PIDs auf stdout, ps macht sie lesbar.
+apt_lock_holders() {
+    local pids csv
+    # shellcheck disable=SC2155
+    pids=$(fuser /var/lib/apt/lists/lock /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend 2>/dev/null) || return 1
+    # fuser trennt PIDs mit Whitespace und meldet denselben Prozess mehrfach,
+    # wenn er mehrere Lock-Dateien hält (Regelfall: apt hält lock und
+    # lock-frontend). procps-ps nimmt nur EINE kommagetrennte -p-Liste;
+    # Trailing-Operanden gefolgt von -o enden in "process ID list syntax
+    # error" — die Diagnose wäre still leer (Codex-Review 13.10.2026, B1).
+    # Also: splitten, deduplizieren, als EIN Argument übergeben.
+    # shellcheck disable=SC2086
+    csv=$(printf '%s\n' $pids | sort -u | paste -sd, -)
+    [[ "$csv" =~ ^[0-9]+(,[0-9]+)*$ ]] || return 1
+    ps -p "$csv" -o pid=,user=,etime=,comm= 2>/dev/null || return 1
+}
+
+log_lock_holders() {
+    local level="$1"
+    local holders
+    # shellcheck disable=SC2155
+    holders=$(apt_lock_holders || true)
+    [[ -n "$holders" ]] || return 0
+    printf '%s\n' "$holders" | while IFS= read -r line; do
+        log "$level" "$2: $line"
+    done
+}
+
 wait_for_apt_lock() {
     local waited=0
     while fuser /var/lib/apt/lists/lock >/dev/null 2>&1 || \
           fuser /var/lib/dpkg/lock >/dev/null 2>&1 || \
           fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
-        
+
         if [[ $waited -ge $APT_LOCK_WAIT ]]; then
             log "ERROR" "Apt-Lock konnte nach ${APT_LOCK_WAIT}s nicht erhalten werden"
+            log_lock_holders "ERROR" "Lock-Inhaber"
             return 1
         fi
-        
+
+        if [[ $waited -eq 0 ]]; then
+            log_lock_holders "INFO" "Apt-Lock belegt durch"
+        fi
         log "INFO" "Warte auf apt-Lock... (${waited}/${APT_LOCK_WAIT}s)"
         sleep "$APT_LOCK_INTERVAL"
         waited=$((waited + APT_LOCK_INTERVAL))
@@ -1354,7 +1382,7 @@ show_summary() {
 # =====================================
 main() {
     log "INFO" "========================================="
-    log "INFO" "VPS Auto-Update v2.1 gestartet"
+    log "INFO" "VPS Auto-Update v2.2 gestartet"
     log "INFO" "========================================="
     log "INFO" "Datum: $(date)"
     log "INFO" "Server: $(hostname)"
@@ -1377,6 +1405,17 @@ main() {
         exit 1
     fi
     
+
+    # Apt-Lock VOR dem Container-Stopp sicherstellen (Vorfall 04.10.2026:
+    # 5:40 min Warteloop mit bereits gestopptem Mailcow-Stack, danach Abbruch).
+    # Ist apt dauerhaft belegt — typischerweise unattended-upgrades —, endet
+    # der Lauf HIER mit Exit 1, ohne dass ein Container angefasst wurde.
+    # Ein erneutes Warten in update_system bleibt als Race-Kissen nach dem
+    # Stoppen (Fenster Stoppen → apt-get update).
+    if ! wait_for_apt_lock; then
+        log "ERROR" "Abbruch vor dem Container-Stopp: apt durch anderen Prozess belegt"
+        exit 1
+    fi
     # Docker-Container stoppen
     stop_docker_containers
     
@@ -1440,6 +1479,15 @@ if [[ "${1:-}" == "--check-ssh-only" ]]; then
     trap - EXIT
     verify_ssh_before_reboot
     exit
+fi
+
+# Root-Check als LETZTE Hürde vor main — NACH dem --check-ssh-only-Zweig,
+# der bewusst ohne root laufen darf. Vorher stand er in check_prerequisites
+# und lief damit NACH dem Banner: als Nicht-root erzeugte jede log()-Zeile
+# eine tee-Fehlermeldung ("Permission denied"), bevor der Abbruch kam.
+if [[ $EUID -ne 0 ]]; then
+    printf 'Fehler: Dieses Skript muss als root ausgeführt werden\n' >&2
+    exit 1
 fi
 
 # Skript ausführen

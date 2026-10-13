@@ -1,5 +1,37 @@
 # VPS Script Collection - Version History
 
+
+## vps-update-auto.sh v2.2 - Apt-Lock Pre-Flight & Lock-Diagnose (2026-10-04, Review-Fixes 2026-10-13)
+
+**Vorfall** (Mailcow-Host): Der Lauf stoppte erst ALLE Container und wartete
+dann 300s vergeblich auf den apt-Lock — gehalten von einem anderen Prozess
+(typisch: `unattended-upgrades`). Ergebnis: 5:40 min Mail-Downtime, Abbruch
+ohne Update, Notfall-Restart.
+
+- **Apt-Lock-Prüfung VOR dem Container-Stopp**: Ist der Lock länger als
+  `APT_LOCK_WAIT` (Default 300s) belegt, endet der Lauf mit Exit 1, bevor
+  irgendein Container angefasst wird — keine Downtime mehr im Warteloop.
+- **Lock-Inhaber-Diagnose**: `wait_for_apt_lock` protokolliert beim ersten
+  Warten und beim Timeout, welcher Prozess die apt/dpkg-Locks hält
+  (PID, User, Laufzeit) — statt nur "Lock konnte nicht erhalten werden".
+- **Root-Check vor dem Banner**: Aufruf ohne sudo erzeugt keine
+  tee-Fehlermeldungen mehr auf `/var/log/vps-update.log`;
+  `--check-ssh-only` bleibt bewusst ohne root aufrufbar.
+- **Review-Fixes (Codex gpt-6-astra, 13.10.2026, REQUEST CHANGES)**:
+  - B1 (MAJOR): `fuser` meldet denselben Prozess mehrfach, wenn er mehrere
+    Lock-Dateien hält (Regelfall); `ps -p 4242 4242 -o …` stirbt auf
+    procps an "process ID list syntax error" → Diagnose still leer.
+    Fix: PIDs splitten, deduplizieren, als EINE kommagetrennte, quotierte
+    `-p`-Liste übergeben; Regex-Gate gegen Müll-Eingaben.
+  - B2 (MINOR): Historischer Rot-Beweis (`TEST_LOGIC_TARGET` auf Stand vor
+    v2.2) starb beim Extrahieren der neuen Funktionen, bevor Assertionen
+    liefen. Fix: `extract_fn_optional` mit No-Op-Fallback; nachgewiesen
+    6 rot / 1 grün gegen `5bfbfd4`.
+- **Tests**: Neue Fallgruppe `apt-lock` in `tools/test-logic.sh`
+  (Lock-Zustände inkl. Doppel-/Mehrfach-PID + main()-Reihenfolge; Suite
+  42/42). ps-Stub erzwingt jetzt den Argumentvertrag (`-p CSV -o fmt`,
+  keine Duplikate) und diskriminiert die Mutation nachweislich.
+
 ## Version 3.0.0 - Enterprise Backup & Advanced Monitoring (2024-12-19)
 
 ### 🚀 Major Release - Professional VPS Management Suite
