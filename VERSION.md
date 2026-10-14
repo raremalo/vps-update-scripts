@@ -1,6 +1,38 @@
 # VPS Script Collection - Version History
 
 
+## vps-update-auto.sh v2.3 - security_check v2 (2026-10-14)
+
+Der wöchentliche Security Quick Check meldet jetzt realistisch und
+flottenrelevant. Auslöser war ein read-only Flottentest (13./14.10.2026),
+der zwei defekte Prüfpunkte und zwei echte Lücken aufdeckte.
+
+- **N19-Fix — SSH-Angriffszähler**: echtes 24h-Fenster via journalctl plus
+  erweiterte Muster (`Invalid user`, `Connection closed by authenticating
+  user` — die dominierende Scanner-Klasse). Gemessen auf lorini: 0 Treffer
+  auf altem Muster bei 1 562 realen Versuchen/24h. Producer-Status wird vor
+  dem Zählen geprüft (grep -c liefert sonst immer eine Zahl → fail-open).
+- **N18-Fix — Portliste**: `ss -tln` ohne -p, Spalte 4 isoliert, Loopback
+  übersprungen, Bindung+Port ausgewiesen, Service-Lookup portabel per sed
+  (grep -P existiert auf BSD nicht). Vorher kollabierte die Liste als root
+  zu einer Müllzeile. Zusätzlich Loopback/öffentlich-Unterscheidung.
+- **Neue Prüfpunkte**: `PasswordAuthentication no` (Flottenregel key-only),
+  `PermitRootLogin` (WARNING bei `yes`), `fail2ban aktiv` (vmd202656 lief bis
+  14.10. ohne), `unattended-upgrades` (apt-daily-upgrade.timer + Ausführungs-
+  Dienst).
+- **Codex-Review (gpt-6-astra, 14.10., REQUEST CHANGES, 9 Befunde)** — alle
+  gefixt: Wildcard-Listener werden gelistet (B1), JEDE SSH-Config wird geprüft
+  statt nur der Default-Instanz (B2), unattended-upgrades prüft
+  Ausführungs-Dienst + Timer-Zustand statt des Shutdown-Helpers (B3),
+  ss-Ausfall wird zur WARNING statt grünem „keine Ports" (B4), EINE
+  Journal-Lesung mit erfassungsseitigem Status (B5), Zähler-Filter
+  `_COMM=sshd` gegen Dovecot-Fehltreffer (B6), Service-Name passend zur
+  Bindung (B7), `reloading` gilt als aktiv (B8), Test-Stubs erzwingen
+  Argument-Verträge (B9).
+- **Tests**: Fallgruppe `security-check` (14 Fälle, Stubs mit Argument-
+  Verträgen), Suite **56/56**, gegen `4e769fe` **14/14 rot**; Mutationen
+  (`|| true` weg, `_COMM=sshd` weg) nachweislich rot.
+
 ## vps-update-auto.sh v2.2 - Apt-Lock Pre-Flight & Lock-Diagnose (2026-10-04, Review-Fixes 2026-10-13)
 
 **Vorfall** (Mailcow-Host): Der Lauf stoppte erst ALLE Container und wartete

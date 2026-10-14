@@ -748,15 +748,226 @@ case_apt_lock() {
         'Notfall'
 }
 
-# ---------------------------------------------------------------------------
+build_security_check_runner() {
+    {
+        cat <<'HEAD'
+set -euo pipefail
+SECONDS=0
+LOGFILE=/dev/null
+BLUE=""; GREEN=""; YELLOW=""; RED=""; CYAN=""; NC=""
+# Stubs mit Argument-Vertrag (Codex B9): Verstöße gegen den Produzenten-
+# Vertrag (falsche/fehlende Argumente) werden rot, statt still grün.
+journalctl() {
+    local have_since=0 have_comm=0 a
+    for a in "$@"; do
+        [[ "$a" == "--since" ]] && have_since=1
+        [[ "$a" == "_COMM=sshd" ]] && have_comm=1
+    done
+    if [[ $have_since -eq 0 || $have_comm -eq 0 ]]; then
+        printf 'journalctl-stub: Vertrag verletzt (erwartet --since + _COMM=sshd): %s\n' "$*" >&2
+        return 22
+    fi
+    case "${T_JOURNAL:-ok}" in
+        ok)
+            local i
+            for ((i = 0; i < ${T_JOURNAL_N:-0}; i++)); do
+                printf 'Okt 14 10:00:00 host sshd[1]: Invalid user admin from 10.0.0.9\n'
+            done
+            ;;
+        broken) printf 'Verbindung zum Journal fehlgeschlagen\n' >&2; return 1 ;;
+    esac
+    return 0
+}
+ss() {
+    case "$*" in
+        -tln)
+            if [[ "${T_SS_BROKEN:-0}" == "1" ]]; then return 1; fi
+            printf '%s\n' "${T_SS_LISTEN}"
+            ;;
+        -tlnp)
+            printf '%s\n' "${T_SS_PROC}"
+            ;;
+        *)
+            printf 'ss-stub: Vertrag verletzt (erwartet genau -tln oder -tlnp): %s\n' "$*" >&2
+            return 22
+            ;;
+    esac
+}
+who() { printf 'shogun pts/0\nroot pts/1\n'; }
+ufw() { printf 'Status: %s\n' "${T_UFW:-active}"; }
+last() { printf 'root pts/0 1.2.3.4 Wed Okt 14 10:00 - 10:30 (00:30)\n'; }
+sshd() {
+    # Argumentvertrag: -T [-f <config>]; Werte pro Config-Basename
+    local mode="${T_SSHD_T:-ok}" cfg=""
+    if [[ "${1:-}" != "-T" ]]; then
+        printf 'sshd-stub: Vertrag verletzt (erwartet -T ...): %s\n' "$*" >&2
+        return 22
+    fi
+    cfg=$(printf '%s\n' "$*" | awk '{for (i=1; i<=NF; i++) if ($i=="-f") print $(i+1)}')
+    [[ -z "$cfg" ]] && cfg="sshd_config"
+    if [[ "${cfg##*/}" != "sshd_config" && -n "${T_SSHD_ALT:-}" ]]; then
+        mode="$T_SSHD_ALT"
+    fi
+    case "$mode" in
+        ok)     printf 'port 22\npasswordauthentication no\npermitrootlogin without-password\n' ;;
+        open)   printf 'port 22\npasswordauthentication yes\npermitrootlogin yes\n' ;;
+        broken) printf 'kann Konfiguration nicht lesen\n' >&2; return 1 ;;
+    esac
+}
+systemctl() {
+    # Realistische Exit-Codes: active/reloading/waiting/enabled→0,
+    # inactive/failed/disabled→3, Unit fehlt→4 (Codex B9)
+    local unit="$2" verb="$1" state
+    case "$verb $unit" in
+        "is-active fail2ban")                  state="${T_F2B:-active}" ;;
+        "is-active apt-daily-upgrade.timer")   state="${T_UU_TIMER_ACT:-waiting}" ;;
+        "is-enabled apt-daily-upgrade.timer")  state="${T_UU_TIMER_EN:-enabled}" ;;
+        "is-active apt-daily-upgrade.service") state="${T_UU_EXEC:-active}" ;;
+        *) printf 'systemctl-stub: unerwarteter Aufruf: %s\n' "$*" >&2; return 22 ;;
+    esac
+    case "$state" in
+        active|reloading|waiting|enabled) printf '%s\n' "$state"; return 0 ;;
+        missing) return 4 ;;
+        *) printf '%s\n' "$state"; return 3 ;;
+    esac
+}
+HEAD
+        extract_fn log
+        extract_fn phase_start
+        extract_fn phase_end
+        extract_fn security_check
+        cat <<'FOOT'
+security_check
+FOOT
+    } > "$WORKDIR/sec-check-runner.sh"
+}
+
+run_sec() {
+    # Argumente: name, Muss-Muster, Verbot-Muster; T_*-Variablen vom Aufrufer
+    local name="$1" must="$2" forbid="${3:-}" out rc
+    local dir="$WORKDIR/sec-$name"
+    mkdir "$dir"
+    out=$(T_JOURNAL="${T_JOURNAL:-ok}" T_JOURNAL_N="${T_JOURNAL_N:-0}" \
+        T_SS_LISTEN="${T_SS_LISTEN}" T_SS_PROC="${T_SS_PROC}" \
+        T_SS_BROKEN="${T_SS_BROKEN:-0}" T_SSHD_T="${T_SSHD_T:-ok}" \
+        T_SSHD_ALT="${T_SSHD_ALT:-}" T_F2B="${T_F2B:-active}" \
+        T_UU_TIMER_ACT="${T_UU_TIMER_ACT:-waiting}" \
+        T_UU_TIMER_EN="${T_UU_TIMER_EN:-enabled}" \
+        T_UU_EXEC="${T_UU_EXEC:-active}" \
+        VPS_SSHD_CONFIGS="$VPS_SSHD_CONFIGS" \
+        "$BASH" "$WORKDIR/sec-check-runner.sh" 2>&1)
+    rc=$?
+    check_run_output "$name" "$out" 0 "$rc" "$must" "$forbid" "" ""
+}
+
+SEC_LISTEN_MIXED='State Recv-Q Send-Q Local Address:Port Peer Address:Port
+LISTEN 0 128 0.0.0.0:22 0.0.0.0:*
+LISTEN 0 128 127.0.0.1:8123 0.0.0.0:*
+LISTEN 0 128 [::]:443 [::]:*
+LISTEN 0 128 [::1]:6379 [::]:*
+LISTEN 0 4096 *:2223 *:*'
+SEC_LISTEN_LOOPBACK='State Recv-Q Send-Q Local Address:Port Peer Address:Port
+LISTEN 0 128 127.0.0.1:8123 0.0.0.0:*
+LISTEN 0 128 [::1]:6379 [::]:*'
+SEC_LISTEN_DUP='State Recv-Q Send-Q Local Address:Port Peer Address:Port
+LISTEN 0 128 127.0.0.1:8080 0.0.0.0:*
+LISTEN 0 128 203.0.113.5:8080 0.0.0.0:*'
+SEC_PROC_MIXED='LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:(("sshd",pid=900,fd=3))
+LISTEN 0 128 127.0.0.1:8123 0.0.0.0:* users:(("localadmin",pid=901,fd=4))
+LISTEN 0 128 [::]:443 [::]:* users:(("traefik",pid=902,fd=9))
+LISTEN 0 128 [::1]:6379 [::]:* users:(("redis",pid=903,fd=6))
+LISTEN 0 4096 *:2223 *:* users:(("sshd",pid=904,fd=3))'
+SEC_PROC_DUP='LISTEN 0 128 127.0.0.1:8080 0.0.0.0:* users:(("localadmin",pid=901,fd=4))
+LISTEN 0 128 203.0.113.5:8080 0.0.0.0:* users:(("app",pid=905,fd=4))'
+
+case_security_check() {
+    printf '=== Fallgruppe security-check gegen: %s ===\n' "$TARGET"
+    build_security_check_runner
+    # Fake-Config-Baum für die SSH-Instanz-Schleife (VPS_SSHD_CONFIGS-Hook)
+    local cfgdir="$WORKDIR/sshd-cfg"
+    mkdir -p "$cfgdir"
+    : > "$cfgdir/sshd_config"
+    VPS_SSHD_CONFIGS="$cfgdir/sshd_config"
+
+    # Flotten-Frühling: alles grün, Wildcard-Listener erscheint,
+    # Loopback-Ports und ihre Services dürfen nicht erscheinen
+    T_SS_LISTEN="$SEC_LISTEN_MIXED" T_SS_PROC="$SEC_PROC_MIXED" T_JOURNAL_N=50 \
+        run_sec fleet-green \
+        '50 fehlgeschlagene SSH-Versuche \(normal\);0\.0\.0\.0:22 \(sshd\);\*:2223 \(sshd\);3 öffentliche Listener;SSH sshd_config: PasswordAuth=no PermitRootLogin=without-password;fail2ban: aktiv;unattended-upgrades: Timer aktiv' \
+        'WARNING;8123;6379;Vertrag verletzt'
+    T_SS_LISTEN="$SEC_LISTEN_MIXED" T_SS_PROC="$SEC_PROC_MIXED" T_JOURNAL_N=0 \
+        run_sec zero-attacks \
+        'Keine fehlgeschlagenen SSH-Versuche' \
+        'WARNING'
+    T_SS_LISTEN="$SEC_LISTEN_MIXED" T_SS_PROC="$SEC_PROC_MIXED" T_JOURNAL_N=1500 \
+        run_sec high-attacks \
+        'Hohe Angriffslast: 1500' \
+        'nicht ermittelbar'
+    T_SS_LISTEN="$SEC_LISTEN_MIXED" T_SS_PROC="$SEC_PROC_MIXED" T_JOURNAL=broken \
+        run_sec journal-broken \
+        'SSH-Angriffe nicht ermittelbar' \
+        'Keine fehlgeschlagenen'
+    T_SS_LISTEN="$SEC_LISTEN_LOOPBACK" T_SS_PROC="$SEC_PROC_MIXED" T_JOURNAL_N=0 \
+        run_sec all-loopback \
+        'Keine öffentlich gebundenen Ports' \
+        '8123;6379'
+    # Codex B4: ss-Ausfall darf nicht als „keine Ports" grün werden
+    T_SS_LISTEN="$SEC_LISTEN_MIXED" T_SS_PROC="$SEC_PROC_MIXED" T_JOURNAL_N=0 T_SS_BROKEN=1 \
+        run_sec ss-broken \
+        'Portliste nicht ermittelbar' \
+        'Keine öffentlich gebundenen'
+    # Codex B7: gleicher Port, unterschiedliche Bindung — Service muss zur
+    # öffentlichen Bindung (app) gehören, nicht zur Loopback-Zeile (localadmin)
+    T_SS_LISTEN="$SEC_LISTEN_DUP" T_SS_PROC="$SEC_PROC_DUP" T_JOURNAL_N=0 \
+        run_sec dup-binding \
+        '203\.0\.113\.5:8080 \(app\)' \
+        'localadmin'
+    # Codex B2: zweite SSH-Config mit PA=yes muss namentlich auffallen
+    : > "$cfgdir/sshd_config_2222"
+    VPS_SSHD_CONFIGS="$cfgdir/sshd_config $cfgdir/sshd_config_2222"
+    T_SS_LISTEN="$SEC_LISTEN_MIXED" T_SS_PROC="$SEC_PROC_MIXED" T_JOURNAL_N=0 T_SSHD_ALT=open \
+        run_sec sshd-alt-open \
+        'SSH sshd_config_2222: PasswordAuth=yes.*Flottenregel' \
+        'SSH sshd_config_2222: PasswordAuth=no'
+    T_SS_LISTEN="$SEC_LISTEN_MIXED" T_SS_PROC="$SEC_PROC_MIXED" T_JOURNAL_N=0 T_SSHD_ALT=broken \
+        run_sec sshd-alt-broken \
+        'SSH-Config sshd_config_2222 nicht prüfbar' \
+        'Flottenregel'
+    rm -f "$cfgdir/sshd_config_2222"
+    VPS_SSHD_CONFIGS="$cfgdir/sshd_config"
+    # Codex B8: reloading gilt systemd als aktiv
+    T_SS_LISTEN="$SEC_LISTEN_MIXED" T_SS_PROC="$SEC_PROC_MIXED" T_JOURNAL_N=0 T_F2B=reloading \
+        run_sec f2b-reloading \
+        'fail2ban: aktiv' \
+        'Bruteforce-Schutz fehlt'
+    T_SS_LISTEN="$SEC_LISTEN_MIXED" T_SS_PROC="$SEC_PROC_MIXED" T_JOURNAL_N=0 T_F2B=inactive \
+        run_sec f2b-inactive \
+        'fail2ban: inactive.*Bruteforce-Schutz fehlt' \
+        'fail2ban: aktiv'
+    # Codex B3: Ausführungs-Dienst failed / Timer disabled / Messausfall
+    T_SS_LISTEN="$SEC_LISTEN_MIXED" T_SS_PROC="$SEC_PROC_MIXED" T_JOURNAL_N=0 T_UU_EXEC=failed \
+        run_sec uu-exec-failed \
+        'Ausführungs-Dienst=failed' \
+        'Timer aktiv'
+    T_SS_LISTEN="$SEC_LISTEN_MIXED" T_SS_PROC="$SEC_PROC_MIXED" T_JOURNAL_N=0 T_UU_TIMER_EN=disabled T_UU_TIMER_ACT=inactive \
+        run_sec uu-disabled \
+        'Timer=disabled' \
+        'Timer aktiv'
+    T_SS_LISTEN="$SEC_LISTEN_MIXED" T_SS_PROC="$SEC_PROC_MIXED" T_JOURNAL_N=0 T_UU_EXEC=missing \
+        run_sec uu-measfail \
+        'Ausführungs-Dienst=fehlt' \
+        'Timer aktiv'
+}
+
 
 case "$CASE_FILTER" in
-    "") case_ssh_guard; printf '\n'; case_stack_verify; printf '\n'; case_apt_update; printf '\n'; case_apt_lock ;;
+    "") case_ssh_guard; printf '\n'; case_stack_verify; printf '\n'; case_apt_update; printf '\n'; case_apt_lock; printf '\n'; case_security_check ;;
     ssh-guard) case_ssh_guard ;;
     stack-verify) case_stack_verify ;;
     apt-update) case_apt_update ;;
     apt-lock) case_apt_lock ;;
-    *) die "unbekannte Fallgruppe: $CASE_FILTER (vorhanden: ssh-guard, stack-verify, apt-update, apt-lock)" ;;
+    security-check) case_security_check ;;
+    *) die "unbekannte Fallgruppe: $CASE_FILTER (vorhanden: ssh-guard, stack-verify, apt-update, apt-lock, security-check)" ;;
 esac
 
 printf '\nErgebnis: %s gruen, %s rot\n' "$PASS" "$FAIL"

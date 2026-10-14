@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # vps-update-auto.sh
 # Intelligentes VPS Update-Skript das automatisch Coolify oder Dokploy erkennt
-# Version 2.2
+# Version 2.3
 
 set -euo pipefail
 
@@ -1002,44 +1002,89 @@ security_check() {
     
     log "INFO" "=== Security Quick Check ==="
     
-    # 1. Fehlgeschlagene SSH-Logins (letzte 24h)
+    # 1. SSH-Angriffe (echtes 24h-Fenster, echte Muster — N19)
+    # "Failed password" allein sieht die dominierende Angriffsklasse nicht:
+    # Scanner disconnecten pre-auth ("Invalid user", "Connection closed by
+    # authenticating user"). Gemessen 13.10.2026 auf lorini: 0 Treffer auf
+    # altem Muster bei 1 562 realen Versuchen in 24h. journalctl liefert das
+    # Fenster; auth.log wäre rotierend und fensterlos.
     # grep -c druckt die Trefferzahl selbst — auch die 0 — und endet bei null
-    # Treffern mit Exit 1. Ein '|| echo 0' hängt dann eine ZWEITE Null an
-    # ("0\n0"), und beide [[ -gt ]]-Vergleiche unten sterben am Syntaxfehler
+    # Treffern mit Exit 1. Ein '|| echo 0' hängt eine ZWEITE Null an
     # (N12, gefunden im Rollout-0-Volllauf auf vmd202656).
-    local ssh_failed=""
-    if [[ -f /var/log/auth.log ]]; then
-        ssh_failed=$(grep -c "Failed password" /var/log/auth.log 2>/dev/null || true)
-    elif journalctl --version >/dev/null 2>&1; then
-        ssh_failed=$(journalctl -u sshd --since "24 hours ago" --no-pager 2>/dev/null | grep -c "Failed password" || true)
+    local ssh_attacks="" journal_out
+    # EINE Lesung zählen (Codex B5): ein separater Probe-Lauf validiert nicht
+    # die Zähl-Lesung — der Status der erfassenden Lesung selbst zählt.
+    # Filter _COMM=sshd (Codex B6): nur sshd-Prozesse zählen — sonst blähen
+    # dovecot/postfix-Meldungen ("Invalid user" bei Mail-Logins) den
+    # SSH-Zähler auf (Mailcow-Host vmd168409).
+    if command -v journalctl >/dev/null 2>&1 \
+       && journal_out=$(journalctl --since "24 hours ago" --no-pager _COMM=sshd 2>/dev/null); then
+        # grep -c druckt die Trefferzahl selbst — auch die 0 — und endet bei
+        # null Treffern mit Exit 1; N12: '|| echo 0' hängt eine ZWEITE Null an.
+        ssh_attacks=$(printf '%s\n' "$journal_out" \
+            | grep -cE 'Failed password|Invalid user|Connection closed by authenticating user' || true)
     fi
 
-    if [[ ! "$ssh_failed" =~ ^[0-9]+$ ]]; then
+    if [[ ! "$ssh_attacks" =~ ^[0-9]+$ ]]; then
         # Messausfall sichtbar machen statt fail-open als "keine" zu melden
-        log "WARNING" "🔒 Fehlgeschlagene SSH-Logins nicht ermittelbar (Wert: '${ssh_failed}')"
-    elif [[ $ssh_failed -gt 100 ]]; then
-        log "WARNING" "🔒 ${ssh_failed} fehlgeschlagene SSH-Logins in den letzten 24h"
-    elif [[ $ssh_failed -gt 0 ]]; then
-        log "INFO" "🔒 ${ssh_failed} fehlgeschlagene SSH-Logins (normal)"
+        log "WARNING" "🔒 SSH-Angriffe nicht ermittelbar (Wert: '${ssh_attacks}')"
+    elif [[ $ssh_attacks -gt 1000 ]]; then
+        log "WARNING" "🔒 Hohe Angriffslast: ${ssh_attacks} SSH-Versuche in den letzten 24h"
+    elif [[ $ssh_attacks -gt 100 ]]; then
+        log "WARNING" "🔒 ${ssh_attacks} fehlgeschlagene SSH-Versuche in den letzten 24h"
+    elif [[ $ssh_attacks -gt 0 ]]; then
+        log "INFO" "🔒 ${ssh_attacks} fehlgeschlagene SSH-Versuche (normal)"
     else
-        log "SUCCESS" "🔒 Keine fehlgeschlagenen SSH-Logins"
+        log "SUCCESS" "🔒 Keine fehlgeschlagenen SSH-Versuche"
     fi
-    
+
     # 2. Aktive SSH-Sessions
     local ssh_sessions
     ssh_sessions=$(who 2>/dev/null | wc -l || echo "0")
     log "INFO" "👤 ${ssh_sessions} aktive Session(s)"
-    
-    # 3. Offene Ports (nur wichtige)
-    log "INFO" "🔍 Offene Ports:"
+
+    # 3. Öffentlich gebundene Listener (N18)
+    # Vorher mischte die Pipeline $4 (Adresse:Port) mit $6 (Prozess, nur als
+    # root) und stripte dann bis zum letzten Doppelpunkt — als root kollabierte
+    # die Liste zu einer Müllzeile (13.10.2026 auf lorini belegt). Jetzt:
+    # Spalte 4 isolieren, Loopback überspringen, Bindung+Port ausweisen.
     if command -v ss >/dev/null 2>&1; then
-        ss -tlnp 2>/dev/null | grep "LISTEN" | awk '{print $4, $6}' | sed 's/.*://' | sort -un | while read -r port; do
-            local service
-            service=$(ss -tlnp 2>/dev/null | grep ":${port} " | head -1 | grep -oP 'users:\(\("\K[^"]+' || echo "unknown")
-            log "INFO" "    :${port} (${service})"
-        done
+        local listen_out="" pub_count=0 port service bind addr
+        # Ausfall sichtbar machen (Codex B4): ss -tln druckt im Erfolgsfall
+        # IMMER eine Kopfzeile — leere Ausgabe ist Messausfall, nicht „keine
+        # Ports". Dann kein grünes „Keine öffentlich gebundenen Ports".
+        listen_out=$(ss -tln 2>/dev/null || true)
+        if [[ -z "$listen_out" ]]; then
+            log "WARNING" "🔍 Portliste nicht ermittelbar (ss -tln ohne Ausgabe)"
+        else
+            log "INFO" "🔍 Öffentlich gebundene Ports (Loopback ausgenommen):"
+            while IFS= read -r addr; do
+                port=${addr##*:}
+                bind=${addr%:*}
+                [[ "$port" =~ ^[0-9]+$ ]] || continue
+                # "*" als Bindung ist ein Wildcard-Listener (Dual-Stack) und
+                # darf NICHT übersprungen werden (Codex B1) — nur Ports, die
+                # keine Zahlen sind, fliegen oben raus.
+                case "$bind" in
+                    127.*|localhost|""|\[::1\]*) continue ;;
+                esac
+                # Service passend zur GLEICHEN Bindung (Codex B7): exakter
+                # Spaltenvergleich statt Port-Grep — sonst stammt der Name
+                # vom ersten zufälligen Listener auf demselben Port.
+                service=$(ss -tlnp 2>/dev/null | awk -v a="$addr" '$4 == a' | head -1 \
+                    | sed -n 's/.*users:(("\([^"]*\)".*/\1/p' || true)
+                [[ -n "$service" ]] || service="unknown"
+                log "INFO" "    ${addr} (${service})"
+                pub_count=$((pub_count + 1))
+            done < <(printf '%s\n' "$listen_out" | awk 'NR>1 {print $4}' | sort -u)
+            if [[ $pub_count -eq 0 ]]; then
+                log "SUCCESS" "🔍 Keine öffentlich gebundenen Ports außerhalb Loopback"
+            else
+                log "INFO" "🔍 ${pub_count} öffentliche Listener"
+            fi
+        fi
     fi
-    
+
     # 4. UFW Status
     if command -v ufw >/dev/null 2>&1; then
         local ufw_status
@@ -1050,13 +1095,69 @@ security_check() {
             log "WARNING" "🛡 Firewall (UFW): INAKTIV"
         fi
     fi
-    
+
     # 5. Letzter Login
     local last_login
     last_login=$(last -1 root 2>/dev/null | head -1 || true)
     if [[ -n "$last_login" ]]; then
         log "INFO" "🔑 Letzter root-Login: $last_login"
     fi
+
+    # 6.+7. SSH-Instanzen: Passwort-Login und Root-Login (Flottenregel)
+    # JE gefundene Config prüfen (Codex B2): sshd -T ohne -f bewertet nur die
+    # Default-Instanz — zweite Daemons mit eigener Config (vmd168223 betreibt
+    # /etc/ssh/sshd_config_2222) blieben sonst unsichtbar, während die Meldung
+    # hostweit grün zeigt. Flottenregel: key-only (PA=no) und kein
+    # PermitRootLogin yes. Messwerte 14.10.2026: 6/6 Hosts sauber,
+    # vmd168223 stand bis dahin auf yes.
+    local cfg sshd_raw sshd_pa sshd_prl
+    # VPS_SSHD_CONFIGS: überschreibbar (Test-Harness, gepatchte Umgebungen).
+    # Wortaufspaltung + Globbildung ist hier gewollt.
+    # shellcheck disable=SC2086
+    for cfg in ${VPS_SSHD_CONFIGS:-/etc/ssh/sshd_config /etc/ssh/sshd_config_*}; do
+        [[ -f "$cfg" ]] || continue
+        sshd_raw=$(sshd -T -f "$cfg" 2>/dev/null || true)
+        if [[ -z "$sshd_raw" ]]; then
+            log "WARNING" "🔑 SSH-Config ${cfg##*/} nicht prüfbar (sshd -T fehlgeschlagen)"
+            continue
+        fi
+        sshd_pa=$(printf '%s\n' "$sshd_raw" | awk 'tolower($1)=="passwordauthentication" {print tolower($2)}')
+        sshd_prl=$(printf '%s\n' "$sshd_raw" | awk 'tolower($1)=="permitrootlogin" {print tolower($2)}')
+        if [[ "$sshd_pa" == "no" && "$sshd_prl" != "yes" ]]; then
+            log "SUCCESS" "🔑 SSH ${cfg##*/}: PasswordAuth=${sshd_pa:-unbekannt} PermitRootLogin=${sshd_prl:-unbekannt}"
+        else
+            log "WARNING" "🔑 SSH ${cfg##*/}: PasswordAuth=${sshd_pa:-unbekannt} PermitRootLogin=${sshd_prl:-unbekannt} — Flottenregel: key-only, kein root-password"
+        fi
+    done
+
+    # 8. fail2ban (aktiver Schutz gegen die Angriffslast aus Punkt 1)
+    # vmd202656 lief bis 14.10.2026 ohne — mit 22 907 Versuchen/24h der
+    # meistangegriffene Host. 'reloading' gilt systemd als aktiv (Codex B8).
+    local f2b_state
+    f2b_state=$(systemctl is-active fail2ban 2>/dev/null || true)
+    if [[ "$f2b_state" == "active" || "$f2b_state" == "reloading" ]]; then
+        log "SUCCESS" "🚫 fail2ban: aktiv"
+    else
+        log "WARNING" "🚫 fail2ban: ${f2b_state:-nicht installiert} — SSH-Bruteforce-Schutz fehlt"
+    fi
+
+    # 9. unattended-upgrades (Sicherheitsupdates zwischen den Wochenläufen)
+    # Der eigentliche Lauf hängt an apt-daily-upgrade.{timer,service};
+    # unattended-upgrades.service ist nur der Shutdown-Helper (Codex B3).
+    # Timer: enabled UND armed (waiting/active). Messausfall (leere Ausgabe
+    # von is-active/is-enabled) darf nicht als Erfolg durchgehen.
+    local uu_timer_en uu_timer_act uu_exec
+    uu_timer_en=$(systemctl is-enabled apt-daily-upgrade.timer 2>/dev/null || true)
+    uu_timer_act=$(systemctl is-active apt-daily-upgrade.timer 2>/dev/null || true)
+    uu_exec=$(systemctl is-active apt-daily-upgrade.service 2>/dev/null || true)
+    if [[ "$uu_timer_en" == "enabled" \
+          && ("$uu_timer_act" == "waiting" || "$uu_timer_act" == "active") \
+          && "$uu_exec" != "failed" && -n "$uu_exec" ]]; then
+        log "SUCCESS" "♻️ unattended-upgrades: Timer aktiv"
+    else
+        log "WARNING" "♻️ unattended-upgrades: Timer=${uu_timer_en:-fehlt}/${uu_timer_act:-fehlt}, Ausführungs-Dienst=${uu_exec:-fehlt}"
+    fi
+
     
     phase_end "Security Check"
 }
@@ -1382,7 +1483,7 @@ show_summary() {
 # =====================================
 main() {
     log "INFO" "========================================="
-    log "INFO" "VPS Auto-Update v2.2 gestartet"
+    log "INFO" "VPS Auto-Update v2.3 gestartet"
     log "INFO" "========================================="
     log "INFO" "Datum: $(date)"
     log "INFO" "Server: $(hostname)"
