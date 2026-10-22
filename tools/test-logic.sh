@@ -636,6 +636,7 @@ docker_cleanup() { mark cleanup; return 0; }
 start_deployment_stack() { mark stack; }
 start_other_containers() { mark other; }
 check_container_health() { mark health; }
+clear_selfinflicted_netfilter_bans() { mark netfilter; return 0; }
 security_check() { mark security; }
 check_reboot_required() { mark reboot; return 0; }
 show_summary() { mark summary; }
@@ -739,7 +740,7 @@ case_apt_lock() {
         'Apt-Lock verfügbar;Vertrag verletzt;doppelte PID' \
         3
     run_main_order ok free 0 \
-        'prereq;disk;lock;stop;update;cleanup;stack;other;health;final;security;reboot;summary' \
+        'prereq;disk;lock;stop;update;cleanup;stack;other;health;netfilter;final;security;reboot;summary' \
         '' \
         'mit Fehlern abgebrochen'
     run_main_order lock-busy busy 1 \
@@ -959,15 +960,136 @@ case_security_check() {
         'Timer aktiv'
 }
 
+# ---------------------------------------------------------------------------
+# Fallgruppe netfilter-ban: clear_selfinflicted_netfilter_bans (v2.4)
+#
+# Vorfall 22.10.2026 (vmd168409): Mail-Clients retrien während der Wartungs-
+# downtime mit korrekten Logins auf einen noch unten liegenden Auth-Backend —
+# mailcows netfilter bannt die Client-IP 30 min IP-weit (alle Ports). Der
+# Cleanup muss: (a) auf Nicht-Mailcow-Hosts No-Op sein (ohne Sleep), (b) Bans
+# erkennen und NUR den netfilter-Container neu starten, (c) ohne Ban nichts
+# anfassen, (d) gescheiterten Restart als rc 1 melden, (e) das konfigurierte
+# Zeitfenster an docker logs durchreichen. Stubs erzwingen Argument-Verträge.
+# ---------------------------------------------------------------------------
+
+build_netfilter_ban_runner() {
+    {
+        cat <<'HEAD'
+set -euo pipefail
+NETFILTER_BAN_GRACE="${NETFILTER_BAN_GRACE:-45}"
+NETFILTER_BAN_WINDOW="${NETFILTER_BAN_WINDOW:-30m}"
+log() { local l="$1"; shift; printf 'LOG %s %s\n' "$l" "$*"; }
+phase_start() { :; }
+phase_end() { :; }
+sleep() { printf 'SLEPT %s\n' "$1"; }
+docker() {
+    if [[ "$1" == "ps" ]]; then
+        [[ "${2:-}" == "--format" && "${3:-}" == "{{.Names}}" ]] || { printf 'docker-ps: Argumentvertrag verletzt\n' >&2; return 9; }
+        [[ -n "$T_PS" ]] && printf '%s\n' "$T_PS"
+        return 0
+    fi
+    if [[ "$1" == "logs" ]]; then
+        [[ "$2" == *"netfilter-mailcow"* ]] || { printf 'docker-logs: falscher Container: %s\n' "$2" >&2; return 9; }
+        [[ "${3:-}" == "--since" && -n "${4:-}" ]] || { printf 'docker-logs: Argumentvertrag verletzt\n' >&2; return 9; }
+        printf 'SINCE %s\n' "$4" >> "${T_REC:-/dev/null}"
+        [[ -n "$T_LOGS" ]] && printf '%s\n' "$T_LOGS"
+        return 0
+    fi
+    if [[ "$1" == "restart" ]]; then
+        [[ "$2" == *"netfilter-mailcow"* ]] || { printf 'docker-restart: falscher Container: %s\n' "$2" >&2; return 9; }
+        printf 'RESTART %s\n' "$2" >> "${T_REC:-/dev/null}"
+        return "${T_RESTART_RC:-0}"
+    fi
+    printf 'docker: unerwarteter Aufruf: %s\n' "$*" >&2
+    return 9
+}
+HEAD
+        extract_fn_optional clear_selfinflicted_netfilter_bans || cat <<'NOSTUB'
+# Stand enthält clear_selfinflicted_netfilter_bans() noch nicht (Rot-Beweis
+# gegen v2.3): No-Op lässt alle Erwartungen rot laufen.
+clear_selfinflicted_netfilter_bans() { :; }
+NOSTUB
+        cat <<'FOOT'
+rc=0
+clear_selfinflicted_netfilter_bans || rc=$?
+printf 'RC %s\n' "$rc"
+printf 'REACHED\n'
+exit 0
+FOOT
+    } > "$WORKDIR/netfilter-ban-runner.sh"
+}
+
+run_netfilter_ban() {
+    # Argumente: name, Soll-rc, Pflichtmuster, verbotenes Muster
+    # Docker-Marker (SINCE/RESTART) schreibt der Stub nach T_REC: Die Funktion
+    # leitet restart nach /dev/null um, logs läuft in die grep-Pipe — Marker
+    # auf stdout wären daher grundsätzlich unsichtbar (Test-Falle 22.10.).
+    local name="$1" exp_rc="$2" req="$3" forb="$4"
+    local rec="$WORKDIR/nfrec-$name" out rc bad=""
+    : > "$rec"
+    out=$(T_REC="$rec" bash "$WORKDIR/netfilter-ban-runner.sh" 2>&1); rc=$?
+    out="$out"$'\n'"$(cat "$rec" 2>/dev/null)"
+    if [[ $rc -ne 0 ]]; then
+        bad="Runner stürzte ab (rc=$rc)"
+    elif ! printf '%s\n' "$out" | grep -qx 'REACHED'; then
+        bad="Lauf abgebrochen — Funktion lieferte unerwartet Nicht-Null"
+    elif [[ "$(printf '%s\n' "$out" | grep -oE '^RC [0-9]+' | grep -oE '[0-9]+')" != "$exp_rc" ]]; then
+        bad="rc=$(printf '%s\n' "$out" | grep -oE '^RC [0-9]+') (soll $exp_rc)"
+    elif [[ -n "$req" ]] && ! printf '%s\n' "$out" | grep -qF "$req"; then
+        bad="Pflichtmuster fehlt: $req"
+    elif [[ -n "$forb" ]] && printf '%s\n' "$out" | grep -qF "$forb"; then
+        bad="verbotenes Muster gefunden: $forb"
+    fi
+    if [[ -n "$bad" ]]; then
+        fail "$name" "$bad"
+        printf '%s\n' "$out" | sed 's/^/         | /'
+    else
+        ok "$name"
+    fi
+}
+
+case_netfilter_ban() {
+    printf '=== Fallgruppe netfilter-ban gegen: %s ===\n' "$TARGET"
+    build_netfilter_ban_runner
+    local NL
+    NL=$'\n'
+    local mailcow_ps ban_log ruhig_log
+    mailcow_ps="mailcowdockerized-postfix-mailcow-1${NL}mailcowdockerized-netfilter-mailcow-1${NL}listmonk_app"
+    ban_log="2026-10-22 13:01:21 CRIT: Banning 194.126.177.21/32 for 30 minutes"
+    ruhig_log="2026-10-22 13:07:04 INFO: Initializing mailcow netfilter chain"
+
+    # (a) Nicht-Mailcow-Host: No-Op ohne Fehler — und OHNE Grace-Sleep
+    T_PS="coolify${NL}coolify-db${NL}uptime-kuma" T_LOGS="" \
+        run_netfilter_ban nicht-mailcow-host 0 "Ban-Cleanup nicht nötig" "SLEPT"
+
+    # (b) Ban im Fenster: netfilter-Container neu starten, Fenster durchreichen
+    T_PS="$mailcow_ps" T_LOGS="$ban_log" \
+        run_netfilter_ban ban-loest-restart-aus 0 "RESTART mailcowdockerized-netfilter-mailcow-1" "nichts zu tun"
+    T_PS="$mailcow_ps" T_LOGS="$ban_log" \
+        run_netfilter_ban ban-prueft-fenster 0 "SINCE 30m" ""
+    T_PS="$mailcow_ps" T_LOGS="$ban_log" \
+        run_netfilter_ban ban-wartet-grace 0 "SLEPT 45" ""
+
+    # (c) Kein Ban: nichts anfassen
+    T_PS="$mailcow_ps" T_LOGS="$ruhig_log" \
+        run_netfilter_ban kein-ban-noop 0 "nichts zu tun" "RESTART"
+
+    # (d) Restart scheitert: rc 1, Ban läuft nach F2B_BAN_TIME selbst ab
+    T_PS="$mailcow_ps" T_LOGS="$ban_log" T_RESTART_RC=1 \
+        run_netfilter_ban restart-scheitert 1 "nicht neu starten" ""
+}
+
+
 
 case "$CASE_FILTER" in
-    "") case_ssh_guard; printf '\n'; case_stack_verify; printf '\n'; case_apt_update; printf '\n'; case_apt_lock; printf '\n'; case_security_check ;;
+    "") case_ssh_guard; printf '\n'; case_stack_verify; printf '\n'; case_apt_update; printf '\n'; case_apt_lock; printf '\n'; case_security_check; printf '\n'; case_netfilter_ban ;;
     ssh-guard) case_ssh_guard ;;
     stack-verify) case_stack_verify ;;
     apt-update) case_apt_update ;;
     apt-lock) case_apt_lock ;;
     security-check) case_security_check ;;
-    *) die "unbekannte Fallgruppe: $CASE_FILTER (vorhanden: ssh-guard, stack-verify, apt-update, apt-lock, security-check)" ;;
+    netfilter-ban) case_netfilter_ban ;;
+    *) die "unbekannte Fallgruppe: $CASE_FILTER (vorhanden: ssh-guard, stack-verify, apt-update, apt-lock, security-check, netfilter-ban)" ;;
 esac
 
 printf '\nErgebnis: %s gruen, %s rot\n' "$PASS" "$FAIL"

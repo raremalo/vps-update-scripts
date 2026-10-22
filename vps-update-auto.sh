@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # vps-update-auto.sh
 # Intelligentes VPS Update-Skript das automatisch Coolify oder Dokploy erkennt
-# Version 2.3
+# Version 2.4
 
 set -euo pipefail
 
@@ -41,6 +41,16 @@ DOCKER_PRUNE_VOLUMES="${DOCKER_PRUNE_VOLUMES:-false}"
 # mit Exit ≠ 0 — gestaffelt über DISK_MIN_FREE_MB, das den Lauf ganz abbricht.
 DOCKER_PRUNE_WARN_FREE_PCT="${DOCKER_PRUNE_WARN_FREE_PCT:-10}"
 DOCKER_PRUNE_WARN_FREE_MB="${DOCKER_PRUNE_WARN_FREE_MB:-5120}"
+
+# Mailcow netfilter: Sekunden nach dem Container-Start warten, bevor selbst
+# verursachte Bans geprüft werden — Mail-Clients reconnecten in dieser Phase
+# und lösen die zu prüfenden Bans erst aus (Vorfall 22.10.2026).
+NETFILTER_BAN_GRACE="${NETFILTER_BAN_GRACE:-45}"
+
+# Mailcow netfilter: Zeitfenster, in dem Ban-Auslösungen dem Wartungslauf
+# zugerechnet werden (muss Stoppen→Starten→Grace abdecken).
+NETFILTER_BAN_WINDOW="${NETFILTER_BAN_WINDOW:-30m}"
+
 
 # Wird automatisch erkannt
 DEPLOYMENT_SYSTEM=""
@@ -920,6 +930,55 @@ start_other_containers() {
 }
 
 # =====================================
+# Mailcow netfilter: selbst verursachte Bans entfernen
+# =====================================
+
+# Vorfall 22.10.2026 (vmd168409, Mailcow-Update 2026-09→2026-10): Während
+# des Wartungsfensters retrien Mail-Clients mit KORREKTEN Logins, solange
+# der Auth-Backend (MySQL/Dovecot) noch nicht erreichbar ist — mailcows
+# LUA-Auth meldet dann "unknown user". Der netfilter-Container wertet diese
+# Retry-Bursts als Bruteforce (Schwelle 6 Versuche/600 s) und sperrt die
+# Client-IP 30 Minuten IP-WEIT (nftables-Drop über alle Ports, SSH
+# inklusive). Betroffen besonders geteilte VPN-Egress-IPs (im Vorfall ein
+# Proton-VPN-Exit), für die keine Whitelist möglich ist: Der Ban trifft
+# exakt dann, wenn der Server zurückkommt. Container-Neustart = verifizierter
+# Unban: Bans sind memory-only, die nft-Ketten werden sauber neu aufgebaut,
+# echte Scanner beim nächsten Versuch erneut gebannt (bewiesen am 22.10.:
+# Ban aktiv → Restart → 0 Regeln, SSH und Mail-Auth sofort wieder da).
+clear_selfinflicted_netfilter_bans() {
+    phase_start
+
+    local nf_container
+    nf_container=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -m1 'netfilter-mailcow' || true)
+    if [[ -z "$nf_container" ]]; then
+        # Kein Mailcow-Host — kein Cleanup, kein Fehler (flotten-tauglich)
+        log "INFO" "Kein netfilter-mailcow-Container — Ban-Cleanup nicht nötig"
+        phase_end "Netfilter-Ban-Cleanup übersprungen"
+        return 0
+    fi
+
+    log "INFO" "Warte ${NETFILTER_BAN_GRACE}s auf Client-Reconnects, bevor selbst verursachte Bans geprüft werden..."
+    sleep "$NETFILTER_BAN_GRACE"
+
+    if docker logs "$nf_container" --since "$NETFILTER_BAN_WINDOW" 2>&1 | grep -q "Banning"; then
+        log "WARNING" "netfilter hat im Wartungsfenster Bans ausgelöst (Client-Reconnects auf gestoppten Auth-Backend) — entferne Bans"
+        if docker restart "$nf_container" >/dev/null 2>&1; then
+            log "SUCCESS" "${nf_container} neu gestartet — selbst verursachte IP-Bans entfernt (echte Scanner werden erneut gebannt)"
+        else
+            log "WARNING" "Konnte ${nf_container} nicht neu starten — Bans laufen nach F2B_BAN_TIME (30 min) von selbst ab"
+            phase_end "Netfilter-Ban-Cleanup"
+            return 1
+        fi
+    else
+        log "INFO" "Keine Bans im Wartungsfenster — nichts zu tun"
+    fi
+
+    phase_end "Netfilter-Ban-Cleanup"
+    return 0
+}
+
+
+# =====================================
 # Docker Health Check
 # =====================================
 check_container_health() {
@@ -1483,7 +1542,7 @@ show_summary() {
 # =====================================
 main() {
     log "INFO" "========================================="
-    log "INFO" "VPS Auto-Update v2.3 gestartet"
+    log "INFO" "VPS Auto-Update v2.4 gestartet"
     log "INFO" "========================================="
     log "INFO" "Datum: $(date)"
     log "INFO" "Server: $(hostname)"
@@ -1541,6 +1600,12 @@ main() {
     
     # Docker Health Check
     check_container_health
+
+    # Mailcow-Falle 22.10.2026: selbst verursachte netfilter-Bans (Client-
+    # Reconnects während der Downtime) entfernen — niemals nackt, ein
+    # Fehlschlag darf den Lauf nicht abwürgen (Muster wie docker_cleanup)
+    clear_selfinflicted_netfilter_bans || { RUN_RC=$?; RUN_RC_STEPS+=" clear_selfinflicted_netfilter_bans"; }
+
     
     # Status anzeigen
     show_final_status

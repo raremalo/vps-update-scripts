@@ -1,6 +1,43 @@
 # VPS Script Collection - Version History
 
 
+
+## vps-update-auto.sh v2.4 - Mailcow netfilter-Ban-Cleanup (2026-10-22)
+
+**Vorfall** (Mailcow-Host vmd168409): Nach dem PHP-Sicherheits-Update
+(mailcow 2026-09→2026-10, 2:11 min Downtime wegen CVE-2026-109618/-109619)
+sperrte der netfilter-Container die Client-IP 30 Minuten IP-weit — SSH,
+IMAP, SMTP, alles. Ursache KEINE Client-Fehlkonfiguration (alle 6 beteiligten
+Adressen sind echte Mailboxes und authen danach erfolgreich): Während des
+Restartfensters retrien die Clients korrekt, solange der Auth-Backend
+(MySQL/Dovecot) unten war — mailcows LUA-Auth meldet das als "unknown user",
+netfilter zählt 6 Versuche/600 s als Bruteforce und bannt. Die Egress-IP
+war ein geteilter Proton-VPN-Exit (Whois: CH-PROTONVPN-2) — Whitelist
+unmöglich, Skellen-Anhebung verworfen (schwächt Bruteforce-Schutz).
+
+- **Neu: `clear_selfinflicted_netfilter_bans()`** — läuft nach
+  `check_container_health()`: erkennt Mailcow-Hosts am Container-Namen
+  `*netfilter-mailcow*`, wartet `NETFILTER_BAN_GRACE` (Default 45 s, damit
+  die Client-Reconnects die Bans überhaupt erst auslösen), prüft
+  `docker logs --since NETFILTER_BAN_WINDOW` (Default 30 m) auf "Banning"
+  und startet im Trefferfall nur den netfilter-Container neu. Kein Mailcow-
+  Host → No-Op ohne Fehler (flotten-tauglich). Fehlgeschlagener Restart →
+  Teilschritt-Warnung über das RUN_RC-Muster (wie docker_cleanup), Bans
+  laufen dann nach F2B_BAN_TIME selbst ab.
+- **Unban-Mechanik verifiziert** (22.10., live auf vmd168409): Container-
+  Neustart leert die nft-Ketten (Bans sind memory-only) und baut sie sauber
+  neu auf — echte Scanner werden beim nächsten Versuch erneut gebannt.
+  Redis-Struktur (aus /app/main.py): `F2B_ACTIVE_BANS`, `F2B_QUEUE_UNBAN`,
+  `F2B_PERM_BANS`; Zugang: `RP=$(grep -m1 "^REDISPASS=" mailcow.conf | cut
+  -d= -f2-)` — der Schlüssel heißt REDISPASS (ohne Unterstrich); die
+  netfilter-API (:8080) lauscht in diesem Stand nicht.
+- **Tests**: Fallgruppe `netfilter-ban` in `tools/test-logic.sh` (6 Fälle:
+  Nicht-Mailcow-Host, Ban→Restart, Fenster-Durchreichung, Grace-Sleep vor
+  Log-Prüfung, kein Ban→No-Op, Restart scheitert→rc 1; Docker-Stub-Marker
+  laufen über eine Record-Datei, weil die Funktion restart nach /dev/null
+  umleitet). Suite **62/62**; gegen Stand v2.3 (`TEST_LOGIC_TARGET`)
+  nachweislich rot (netfilter-ban 6/6, Reihenfolge-Fall inklusive).
+
 ## vps-update-auto.sh v2.3 - security_check v2 (2026-10-14)
 
 Der wöchentliche Security Quick Check meldet jetzt realistisch und
